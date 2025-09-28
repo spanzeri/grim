@@ -1,4 +1,4 @@
-# Lexer syntac
+# Lexer syntax
 
 Note this is mostly for reference. This is not a very formal specification yet.
 
@@ -25,9 +25,8 @@ Note this is mostly for reference. This is not a very formal specification yet.
 |                                                   < Left associative
 &&                                                  < Left associative
 ||                                                  < Left associative
-?:                                                  < Right associative
 = += -= *= /= %= <<= >>= &= ^= |= &&= ||= := ::     < Right associative
-,                                                   < Left associative
+? :                                                 < Right associative
 ```
 
 Operators that are more than a character long need names:

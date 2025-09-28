@@ -2,8 +2,8 @@
 // Core header that contains all the basic definitions and utilities.
 //
 
-#ifndef GRIMC_CORE_H
-#define GRIMC_CORE_H
+#ifndef GRIMC_COMMON_H
+#define GRIMC_COMMON_H
 
 #include <errno.h>
 #include <float.h>
@@ -67,6 +67,29 @@
         } while (0)
 #endif
 
+#define NOT_IMPLEMENTED() __ASSERT_FAIL("Not implemented")
+
+#if !defined(NDEBUG)
+    #define ENABLE_TESTS 1
+#endif
+
+#if ENABLE_TESTS
+    #define DO_TEST(name)       test__##name()
+    #define DECL_TEST(name)  void test__##name(void)
+    #define TEST(name)                                          \
+        void test__##name##__impl(void);                        \
+        void test__##name(void) {                               \
+            fprintf(stdout, "=== Running test: %s\n", #name);   \
+            test__##name##__impl();                             \
+            fprintf(stdout, "=== Test %s passed. \n", #name);   \
+        }                                                       \
+        void test__##name##__impl(void)
+#else
+    #define DO_TEST(call)       ((void)0)
+    #define DECLARE_TEST(name)  ((void)0)
+    #define TEST(name, ...)     [[maybe_unused]] static void test__##name(void)
+#endif
+
 typedef uint8_t             u8;
 typedef uint16_t            u16;
 typedef uint32_t            u32;
@@ -109,7 +132,7 @@ static const i64    I64_MAX = 9223372036854775807LL;
 #define PRINTF_LIKE(fmt_idx, first_arg) __attribute__((format(printf, fmt_idx, first_arg)))
 
 [[noreturn]] PRINTF_LIKE(3, 4)
-static void fatal__impl(const char *file, int line, const char *fmt, ...);
+void fatal__impl(const char *file, int line, const char *fmt, ...);
 
 #define fatal(...)  fatal__impl(__FILE__, __LINE__, __VA_ARGS__)
 
@@ -152,4 +175,56 @@ typedef struct DArray_Header {
 
 void *darray__grow(void *da, usize len, usize elem_size);
 
-#endif // GRIMC_CORE_H
+//
+// Strings
+//
+
+typedef struct String {
+    const char* data;
+    int         len;
+} String;
+
+static inline String str_from_cstr(const char *cstr) {
+    return (String){
+        .data = cstr,
+        .len  = (int)strlen(cstr),
+    };
+}
+
+static inline String str_from_range(const char *start, const char *end) {
+    ASSERT(end >= start, "Invalid string range");
+    return (String){
+        .data = start,
+        .len  = (int)(end - start),
+    };
+}
+
+#define str_from_lit(str) ((String){ .data = str, .len = sizeof(str) - 1 })
+
+static inline bool str_eq(String a, String b) {
+    return a.len == b.len && (a.data == b.data || memcmp(a.data, b.data, (usize)a.len) == 0);
+}
+
+//
+// String interning
+//
+
+typedef struct Intern_String {
+    usize       len;
+    const char *str;
+} Intern_String;
+
+const char *str_intern_range(const char *str, const char *end);
+const char *str_intern      (const char *str);
+
+//
+// Error reporting
+//
+
+PRINTF_LIKE(1, 2)
+void syntax_error(const char *fmt, ...);
+
+DECL_TEST(common);
+
+#endif // GRIMC_COMMON_H
+
