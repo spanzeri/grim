@@ -1,5 +1,10 @@
 #include "lex.h"
 
+// Needs to be here for float parsing
+// @TODO: Remove once we have our own float parser
+#include <errno.h>
+#include <math.h>
+
 typedef enum Numeric_Parse_State {
     OK,
     INVALID,
@@ -498,6 +503,12 @@ const String kw_strings[] = {
     [KW_ENUM]       = str_from_lit("enum"),
     [KW_STRUCT]     = str_from_lit("struct"),
     [KW_UNION]      = str_from_lit("union"),
+    [KW_CAST]       = str_from_lit("cast"),
+    [KW_SIZEOF]     = str_from_lit("sizeof"),
+    [KW_ALIGNOF]    = str_from_lit("alignof"),
+    [KW_TRUE]       = str_from_lit("true"),
+    [KW_FALSE]      = str_from_lit("false"),
+    [KW_NULL]       = str_from_lit("null"),
 };
 
 static void lexer_scan_name_or_keyword(Lexer_Context* l, Token* tok) {
@@ -556,19 +567,19 @@ TEST(lex) {
     }
 
     ASSERT(darray_len(tokens) == COUNTOF(expected_tokens),
-        "Got %td tokens, expected %zu", darray_len(tokens), COUNTOF(expected_tokens));
-    for (usize i = 0; i < darray_len(tokens); i++) {
+        "Got %d tokens, expected %zu", darray_len(tokens), COUNTOF(expected_tokens));
+    for (int i = 0; i < darray_len(tokens); i++) {
         ASSERT(tokens[i].kind == expected_tokens[i].kind,
-            "Token %zu: got kind %d, expected %d", i, tokens[i].kind, expected_tokens[i].kind);
+            "Token %d: got kind %d, expected %d", i, tokens[i].kind, expected_tokens[i].kind);
         if (tokens[i].kind == TOK_INT_LITERAL) {
             ASSERT(tokens[i].ivalue == expected_tokens[i].ivalue,
-                "Token %zu: got int_value %llu, expected %llu", i,
+                "Token %d: got int_value %llu, expected %llu", i,
                 tokens[i].ivalue, expected_tokens[i].ivalue);
         }
         else if (tokens[i].kind == TOK_IDENTIFIER) {
             ASSERT(
                 tokens[i].name == str_intern(expected_tokens[i].start),
-                "Token %zu: got identifier '%s', expected '%s'", i,
+                "Token %d: got identifier '%s', expected '%s'", i,
                 tokens[i].name, expected_tokens[i].start);
         }
     }
@@ -580,7 +591,7 @@ TEST(lex) {
         "Identifier interning failed: tokens[1] = '%s', expected 'XY'",
         tokens[1].name);
 
-    for (usize i = 0; i < darray_len(tokens); i++) {
+    for (int i = 0; i < darray_len(tokens); i++) {
         token_print(tokens[i]);
     }
 
@@ -608,7 +619,7 @@ TEST(lex) {
     tok = lexer_next_token(&lex);                                                                               \
     ASSERT(tok.kind == TOK_STRING_LITERAL, "Expected STRING_LITERAL, got %s", token_kind_to_string(tok.kind));  \
     ASSERT(                                                                                                     \
-        strncmp(tok.svalue, (expected), darray_len(tok.svalue) - 1) == 0                                        \
+        strncmp(tok.svalue, (expected), (size_t)darray_len(tok.svalue) - 1) == 0                                \
             && strlen(expected) == (darray_len(tok.svalue) - 1),                                                \
         "Expected svalue \"%s\", got \"%s\". Expected len: %llu, got: %llu.",                                   \
         (expected), tok.svalue, (u64)strlen(expected), (u64)(darray_len(tok.svalue) - 1));                      \

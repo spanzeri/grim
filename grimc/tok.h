@@ -23,6 +23,12 @@ typedef enum Keyword {
     KW_ENUM,
     KW_STRUCT,
     KW_UNION,
+    KW_CAST,
+    KW_SIZEOF,
+    KW_ALIGNOF,
+    KW_TRUE,
+    KW_FALSE,
+    KW_NULL,
 } Keyword;
 
 typedef enum Token_Kind {

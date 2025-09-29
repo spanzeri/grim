@@ -2,8 +2,11 @@
 #include "lex.h"
 #include "ast.h"
 
+static int          get_precedence(Token_Kind kind);
+static void         advance(Parse_Context* p);
+
 static Decl*        parse_proc_decl(Parse_Context* p);
-static Decl*        parse_struct_or_union_decl(Parse_Context* p, bool is_struct);
+static Decl*        parse_struct_or_union_decl(Parse_Context* p);
 static Decl*        parse_enum_decl(Parse_Context* p);
 
 static bool         parse_function_arg(Parse_Context* p, Aggregate_Item* out_item);
@@ -19,6 +22,25 @@ static bool         match_token(Parse_Context* p, Token_Kind kind);
 static bool         match_keyword(Parse_Context* p, Keyword kw);
 static bool         is_token(Parse_Context* p, Token_Kind kind);
 static bool         is_keyword(Parse_Context* p, Keyword kw);
+
+Parse_Context parse_init(const char* source) {
+    Parse_Context res = (Parse_Context){ .lexer = lexer_init(source) };
+    return res;
+}
+
+void parse_shutdown(Parse_Context* pctx) {
+    arena_reset(&pctx->ast_arena);
+}
+
+void parse_begin(Parse_Context* p) {
+    p->previous = (Token){0};
+    p->current  = lexer_next_token(&p->lexer);
+    ast_set_arena(&p->ast_arena);
+}
+
+void parse_end(Parse_Context* p) {
+    ast_set_arena(NULL);
+}
 
 static const int UNARY_PRECEDENCE = 20;
 static const int CALL_PRECEDENCE  = 21;
@@ -51,6 +73,8 @@ static int get_precedence(Token_Kind kind) {
         case '*':       return 10;
         case '/':       return 10;
         case '%':       return 10;
+
+        case '.':       return 11;
     }
 
     return 0;
@@ -60,14 +84,6 @@ static bool is_binary_op(Parse_Context* p) {
     return get_precedence(p->current.kind) != 0;
 }
 
-Parse_Context parse_init(const char* source) {
-    Lexer_Context lexer = lexer_init(source);
-    return (Parse_Context){
-        .lexer    = lexer,
-        .current  = lexer_next_token(&lexer),
-        .previous = (Token){0},
-    };
-}
 
 static void advance(Parse_Context* p) {
     if (p->current.kind == TOK_EOF) { return; }
@@ -152,14 +168,11 @@ Decl* parse_decl(Parse_Context* p) {
     if (is_token(p, TOK_KEYWORD)) {
         switch (p->current.keyword) {
             case KW_PROC:
-                advance(p);
                 return parse_proc_decl(p);
             case KW_STRUCT:
             case KW_UNION:
-                advance(p);
-                return parse_struct_or_union_decl(p, p->previous.keyword == KW_STRUCT);
+                return parse_struct_or_union_decl(p);
             case KW_ENUM:
-                advance(p);
                 return parse_enum_decl(p);
             default:
                 return NULL;
@@ -177,12 +190,22 @@ static Decl* parse_proc_decl(Parse_Context* p) {
     consume(p, '(', "Expected '(' after 'proc'");
     Aggregate_Item* args = NULL;
     for (;;) {
+        if (is_token(p, ')')) { break; }
+        if (match_token(p, TOK_EOF)) {
+            syntax_error("Unexpected end of file in function arguments");
+            break;
+        }
+
         Aggregate_Item item;
         if (parse_function_arg(p, &item)) {
             darray_add(args, item);
         } else {
+            syntax_error("Expected function argument");
             break;
         }
+        if (match_token(p, ',')) { continue; }
+
+        break;
     }
     consume(p, ')', "Expected ')' after function arguments");
     Typespec* return_type = NULL;
@@ -194,11 +217,12 @@ static Decl* parse_proc_decl(Parse_Context* p) {
         }
     }
     Stmt* body = parse_block_stmt(p);
-    return decl_proc(NULL, args, (int)darray_len(args), return_type, body);
+    return decl_proc(ast_dup(args, darray_byte_size(args)), darray_len(args), return_type, body);
 }
 
-static Decl* parse_struct_or_union_decl(Parse_Context* p, bool is_struct) {
+static Decl* parse_struct_or_union_decl(Parse_Context* p) {
     consume_keywords(p, (Keyword[]){KW_STRUCT, KW_UNION}, 2, "Expected 'struct' or 'union' keyword");
+    bool is_struct = p->previous.keyword == KW_STRUCT;
 
     consume(p, '{', "Expected '{' after %s", is_struct ? "struct" : "union");
     Aggregate_Item* items = NULL;
@@ -224,8 +248,14 @@ static Decl* parse_struct_or_union_decl(Parse_Context* p, bool is_struct) {
     }
 
     consume(p, '}', "Expected '}' after %s body", is_struct ? "struct" : "union");
-    return is_struct ? decl_struct(NULL, items, (int)darray_len(items), methods, (int)darray_len(methods))
-                     : decl_union(NULL, items, (int)darray_len(items), methods, (int)darray_len(methods));
+
+    return is_struct
+        ? decl_struct(
+            ast_dup(items, darray_byte_size(items)), darray_len(items),
+            ast_dup(methods, darray_byte_size(methods)), darray_len(methods))
+        : decl_union(
+            ast_dup(items, darray_byte_size(items)), darray_len(items),
+            ast_dup(methods, darray_byte_size(methods)), darray_len(methods));
 
 }
 
@@ -265,7 +295,9 @@ static Decl* parse_enum_decl(Parse_Context* p) {
     }
 
     consume(p, '}', "Expected '}' after enum body");
-    return decl_enum(NULL, items, (int)darray_len(items), methods, (int)darray_len(methods));
+    return decl_enum(
+        ast_dup(items, darray_byte_size(items)), darray_len(items),
+        ast_dup(methods, darray_byte_size(methods)), darray_len(methods));
 }
 
 static bool parse_function_arg(Parse_Context* p, Aggregate_Item* out_item) {
@@ -319,7 +351,7 @@ static bool try_parse_aggregate_item(Parse_Context* p, Aggregate_Item* out_item)
         return false;
     }
 
-    out_item->names         = names;
+    out_item->names         = ast_dup(names, darray_byte_size(names));
     out_item->names_count   = (int)darray_len(names);
     out_item->type          = type;
     out_item->default_value = default_value;
@@ -371,9 +403,9 @@ static Typespec* parse_typespec(Parse_Context* p) {
 // Expression
 //
 
-static Expr* parse_unary_expr(Parse_Context* pctx, bool is_lhs) {
-    advance(pctx);
-    switch (pctx->previous.kind) {
+static Expr* parse_unary_expr(Parse_Context* p, bool is_lhs) {
+    advance(p);
+    switch (p->previous.kind) {
         case '+':
         case '-':
         case '!':
@@ -381,26 +413,85 @@ static Expr* parse_unary_expr(Parse_Context* pctx, bool is_lhs) {
         case '*':
         case TOK_INCREMENT:
         case TOK_DECREMENT:
-            return expr_unary(pctx->previous.kind, parse_expr_precedence(pctx, is_lhs, UNARY_PRECEDENCE));
+            return expr_unary(p->previous.kind, parse_expr_precedence(p, is_lhs, UNARY_PRECEDENCE));
 
         case '(': {
-            Expr* inner = parse_expr_precedence(pctx, is_lhs, 0);
-            consume(pctx, ')', "Expected ')' after expression");
+            Expr* inner = parse_expr_precedence(p, is_lhs, 0);
+            consume(p, ')', "Expected ')' after expression");
             return inner;
         }
 
         case TOK_INT_LITERAL:
-            return expr_int(pctx->previous.ivalue);
+            return expr_int(p->previous.ivalue);
         case TOK_FLT_LITERAL:
-            return expr_flt(pctx->previous.fvalue);
+            return expr_flt(p->previous.fvalue);
         case TOK_CHAR_LITERAL:
             NOT_IMPLEMENTED();  // @TODO: Needs to be marked as a char so that we can properly convert in the
                                 // C back-end.
-            return expr_int((u64)pctx->previous.cvalue);
+            return expr_int((u64)p->previous.cvalue);
         case TOK_STRING_LITERAL:
-            return expr_str(pctx->previous.svalue);
+            return expr_str(p->previous.svalue);
         case TOK_IDENTIFIER:
-            return expr_name(pctx->previous.name);
+            return expr_name(p->previous.name);
+
+        case TOK_KEYWORD: {
+            switch (p->previous.keyword) {
+                case KW_SIZEOF:
+                case KW_ALIGNOF: {
+                    bool is_sizeof = p->previous.keyword == KW_SIZEOF;
+                    consume(p, '(', "Expected '(' after 'sizeof'");
+                    if (match_token(p, ':')) {
+                        Typespec* type = parse_typespec(p);
+                        if (!type) {
+                            syntax_error("Expected type in 'sizeof' expression");
+                            return NULL;
+                        }
+                        consume(p, ')', "Expected ')' after 'sizeof' type");
+                        return is_sizeof
+                            ? expr_sizeof_type(type)
+                            : expr_alignof_type(type);
+                    } else {
+                        Expr* expr = parse_expr(p);
+                        if (!expr) {
+                            syntax_error("Expected expression in 'sizeof' expression");
+                            return NULL;
+                        }
+                        consume(p, ')', "Expected ')' after 'sizeof' expression");
+                        return is_sizeof
+                            ? expr_sizeof_expr(expr)
+                            : expr_alignof_expr(expr);
+                    }
+                };
+
+                case KW_TRUE:
+                    return expr_bool(true);
+                case KW_FALSE:
+                    return expr_bool(false);
+                case KW_NULL:
+                    return expr_null();
+
+                case KW_CAST: {
+                    consume(p, '(', "Expected '(' after 'cast'");
+                    Typespec* target_type = parse_typespec(p);
+                    if (!target_type) {
+                        syntax_error("Expected target type in 'cast' expression");
+                        return NULL;
+                    }
+                    consume(p, ')', "Expected ')' after 'cast' target type");
+                    Expr* value = parse_expr_precedence(p, is_lhs, UNARY_PRECEDENCE);
+                    if (!value) {
+                        syntax_error("Expected value expression in 'cast' expression");
+                        return NULL;
+                    }
+                    return expr_cast(target_type, value);
+                } break;
+
+                default:
+                    syntax_error("Unexpected keyword in expression: %s", keyword_to_string(p->previous.keyword));
+                    return NULL;
+            }
+        } break;
+
         default:
             break;
     }
@@ -428,7 +519,7 @@ static Expr* parse_expr_precedence(Parse_Context* p, bool is_lhs, int min_prec) 
                 if (!match_token(p, ',')) { break; }
             }
             consume(p, ')', "Expected ')' after function call arguments");
-            left = expr_call(left->name, args, (int)darray_len(args));
+            left = expr_call(left->name, ast_dup(args, darray_byte_size(args)), darray_len(args));
             continue;
         }
 
@@ -454,18 +545,23 @@ static Expr* parse_expr_precedence(Parse_Context* p, bool is_lhs, int min_prec) 
     return left;
 }
 
-Expr* parse_expr(Parse_Context* pctx) {
-    return parse_expr_precedence(pctx, false, 0);
+Expr* parse_expr(Parse_Context* p) {
+    Decl* decl = parse_decl(p);
+    if (decl) {
+        return expr_decl(decl);
+    }
+
+    return parse_expr_precedence(p, false, 0);
 }
 
-static Expr* parse_list_expr(Parse_Context* pctx, bool is_lhs) {
+static Expr* parse_list_expr(Parse_Context* p) {
     Expr** elements = NULL;
     for (;;) {
-        Expr* elem = parse_expr(pctx);
+        Expr* elem = parse_expr(p);
         if (!elem)
             break;
         darray_add(elements, elem);
-        if (!match_token(pctx, ',')) {
+        if (!match_token(p, ',')) {
             break;
         }
     }
@@ -478,20 +574,18 @@ static Expr* parse_list_expr(Parse_Context* pctx, bool is_lhs) {
         return single;
     }
 
-    return expr_list(elements, (int)darray_len(elements));
+    return expr_list(ast_dup(elements, darray_byte_size(elements)), darray_len(elements));
 }
 
 //
 // Statement
 //
 
-static Stmt* parse_expr_statement(Parse_Context* p) {
-    Expr* lhs_list = parse_list_expr(p, true);
+static Stmt* parse_expr_or_assignment_stmt(Parse_Context* p) {
+    Expr* lhs_list = parse_list_expr(p);
     if (!lhs_list) {
         return NULL;
     }
-
-    Expr* result = NULL;
 
     switch (p->current.kind) {
         case TOK_VAR_ASSIGN:
@@ -511,22 +605,53 @@ static Stmt* parse_expr_statement(Parse_Context* p) {
         case TOK_BIT_OR_ASSIGN: {
             Token_Kind assign_op = p->current.kind;
             advance(p);
-            Expr* rhs_list = parse_list_expr(p, false);
+            Expr* rhs_list = parse_list_expr(p);
             if (!rhs_list) {
                 syntax_error("Expected right-hand side expression in assignment");
                 return NULL;
             }
-            result = expr_assignment(assign_op, lhs_list, rhs_list);
-            break;
+            if ((rhs_list->kind != EXPR_DECL) &&
+                (rhs_list->kind == EXPR_LIST && rhs_list->list.exprs[rhs_list->list.expr_count - 1]->kind != EXPR_DECL)) {
+                consume(p, ';', "Expected ';' after assignment statement");
+            }
+            return stmt_assignment(assign_op, lhs_list, NULL, rhs_list);
         }
 
-        default:
-            result = lhs_list;
-            break;
-    }
-    consume(p, ';', "Expected ';' after expression statement");
+        case ':': {
+            advance(p);
+            Typespec* type = parse_typespec(p);
+            if (!type) {
+                syntax_error("Expected type in declaration statement");
+                return NULL;
+            }
 
-    return stmt_expr(result);
+            if (match_token(p, ';')) {
+                return stmt_assignment(TOK_CONST_ASSIGN, lhs_list, type, NULL);
+            }
+
+            advance(p);
+            Token_Kind op;
+            switch (p->previous.kind) {
+                case ':': op = TOK_CONST_ASSIGN; break;
+                case '=': op = TOK_VAR_ASSIGN;   break;
+                default:
+                    syntax_error("Expected ':', ':=', or '=' in declaration statement");
+                    return NULL;
+            }
+
+            Expr* rhs_list = parse_list_expr(p);
+            if (!rhs_list) {
+                syntax_error("Expected right-hand side expression in declaration statement");
+                return NULL;
+            }
+
+            return stmt_assignment(op, lhs_list, type, rhs_list);
+        } break;
+
+        default:
+            return stmt_expr(lhs_list);
+    }
+    UNREACHABLE("Unhandled case in parse_expr_or_assignment_stmt");
 }
 
 Stmt* parse_stmt(Parse_Context* p) {
@@ -622,7 +747,7 @@ Stmt* parse_stmt(Parse_Context* p) {
         } break;
 
         default: {
-            return parse_expr_statement(p);
+            return parse_expr_or_assignment_stmt(p);
         } break;
     }
 
@@ -645,12 +770,10 @@ static Stmt* parse_block_stmt(Parse_Context* p) {
         Stmt* stmt = parse_stmt(p);
         if (stmt) {
             darray_add(stmts, stmt);
-        } else {
-            break;
         }
     }
     consume(p, '}', "Expected '}' to end block statement");
-    return stmt_block(stmts, (int)darray_len(stmts));
+    return stmt_block(ast_dup(stmts, darray_byte_size(stmts)), darray_len(stmts));
 }
 
 //
@@ -683,6 +806,7 @@ static bool is_keyword(Parse_Context* p, Keyword kw) {
 
 static void parse_and_print_decl(const char* input) {
     Parse_Context pctx = parse_init(input);
+    parse_begin(&pctx);
     Decl* decl = parse_decl(&pctx);
     if (decl) {
         print_decl(decl, 0);
@@ -690,9 +814,63 @@ static void parse_and_print_decl(const char* input) {
     } else {
         ASSERT_ALWAYS("Failed to parse declaration");
     }
+    parse_end(&pctx);
+    parse_shutdown(&pctx);
+}
+
+static void parse_complex_code(void) {
+    const char* code =
+        "MyType :: struct {\n"
+        "  x, y: f32;\n"
+        "  label: [16]const u8;\n"
+        "  is_active :bool= true;\n"
+        "  is_visible := false;\n"
+        "};\n"
+        "\n"
+        "make_point :: proc(x: f32, y: f32, label: [16]const u8) MyType {\n"
+        "  res :MyType;\n"
+        "  res.x = x;\n"
+        "  res.y = y;\n"
+        "  res.label = label;\n"
+        "  return res;\n"
+        "}\n"
+        "\n"
+        "main :: proc() s32 {\n"
+        "  p := make_point(10.0, 20.0, \"Origin\");\n"
+        "  if p.is_active {\n"
+        "    trace(\"Point %s is at ({}, {})\", p.label, p.x, p.y);\n"
+        "  } else {\n"
+        "    trace(\"Point {} is inactive\", p.label);\n"
+        "  }\n"
+        "  print(\"Size of MyType: {} bytes\", sizeof(:MyType));\n"
+        "  return 0;\n"
+        "}\n";
+
+    Parse_Context pctx = parse_init(code);
+    parse_begin(&pctx);
+
+    Stmt** stmts = NULL;
+    while (pctx.current.kind != TOK_EOF) {
+        Stmt* stmt = parse_stmt(&pctx);
+        if (stmt) {
+            darray_add(stmts, stmt);
+        }
+    }
+
+    for (Stmt** it = stmts; it != darray_end(stmts); it++) {
+        print_stmt(*it, 0);
+        printf("\n");
+    }
+
+    darray_free(stmts);
+    parse_end(&pctx);
+    parse_shutdown(&pctx);
 }
 
 TEST(parse) {
+    break_on_syntax_error = true;
+    parse_complex_code();
+
     parse_and_print_decl("struct { x, y: f32; }");
     parse_and_print_decl("struct {\n  x, y: f32;\n  s := \"hello\";\n}");
     parse_and_print_decl("union { i: s32; f: f32; }");

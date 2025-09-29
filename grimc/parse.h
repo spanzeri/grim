@@ -9,13 +9,18 @@ typedef struct Parse_Context {
     Lexer_Context   lexer;
     Token           current;
     Token           previous;
+    Arena           ast_arena;
 } Parse_Context;
 
 Parse_Context   parse_init(const char* source);
+void            parse_shutdown(Parse_Context* p);
 
-Stmt* parse_stmt(Parse_Context* pctx);
-Decl* parse_decl(Parse_Context* pctx);
-Expr* parse_expr(Parse_Context* pctx);
+void            parse_begin(Parse_Context* p);
+void            parse_end(Parse_Context* p);
+
+Stmt*           parse_stmt(Parse_Context* p);
+Decl*           parse_decl(Parse_Context* p);
+Expr*           parse_expr(Parse_Context* p);
 
 DECL_TEST(parse);
 

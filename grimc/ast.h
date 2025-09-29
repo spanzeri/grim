@@ -4,6 +4,10 @@
 #include "common.h"
 #include "lex.h"
 
+void    ast_set_arena(Arena* arena);
+void*   ast_dup(const void* src, size_t size);
+void*   ast_alloc(size_t size);
+
 typedef struct Expr Expr;
 typedef struct Decl Decl;
 typedef struct Stmt Stmt;
@@ -38,6 +42,7 @@ struct Stmt {
         struct {
             Token_Kind  op;
             Expr*       left;
+            Typespec*   type;
             Expr*       right;
         } assignment;
 
@@ -71,7 +76,7 @@ struct Stmt {
     };
 };
 
-Stmt* stmt_assignment   (Token_Kind op, Expr* left, Expr* right);
+Stmt* stmt_assignment   (Token_Kind op, Expr* left, Typespec* type, Expr* right);
 Stmt* stmt_expr         (Expr* expr);
 Stmt* stmt_return       (Expr* expr);
 Stmt* stmt_block        (Stmt** stmts, int stmt_count);
@@ -148,7 +153,6 @@ typedef struct Proc_Decl {
 
 struct Decl {
     Decl_Kind   kind;
-    const char *name;
     union {
         struct {
             Enum_Item*  items;
@@ -168,15 +172,17 @@ struct Decl {
     };
 };
 
-Decl* decl_enum(const char* name, Enum_Item* items, int item_count, Proc_Decl* methods, int method_count);
-Decl* decl_struct(const char* name, Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count);
-Decl* decl_union(const char* name, Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count);
-Decl* decl_proc(const char* name, Aggregate_Item* args, int arg_count, Typespec* return_type, Stmt* body);
+Decl* decl_enum(Enum_Item* items, int item_count, Proc_Decl* methods, int method_count);
+Decl* decl_struct(Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count);
+Decl* decl_union(Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count);
+Decl* decl_proc(Aggregate_Item* args, int arg_count, Typespec* return_type, Stmt* body);
 
 typedef enum Expr_Kind {
     EXPR_NONE = 0,
     EXPR_LIST,
     EXPR_INT,
+    EXPR_BOOL,
+    EXPR_NULL,
     EXPR_FLT,
     EXPR_STR,
     EXPR_NAME,
@@ -188,7 +194,10 @@ typedef enum Expr_Kind {
     EXPR_INDEX,
     EXPR_COMPOUND,
     EXPR_DECL,
-    EXPR_ASSIGNMENT,
+    EXPR_SIZEOF_EXPR,
+    EXPR_SIZEOF_TYPE,
+    EXPR_ALIGNOF_EXPR,
+    EXPR_ALIGNOF_TYPE,
 } Expr_Kind;
 
 typedef struct Expr_List {
@@ -219,6 +228,7 @@ struct Expr {
         Expr_List       list;
 
         u64             ivalue;
+        bool            bvalue;
         double          fvalue;
         const char*     svalue;
         const char*     name;
@@ -262,19 +272,22 @@ struct Expr {
             int                     initializer_count;
         } compound;
 
-        struct {
-            Token_Kind  op;
-            Expr*       left;
-            Expr*       right;
-        } assignment;
-
         Decl*           decl;
+
+        Expr*           sizeof_expr;
+        Typespec*       sizeof_type;
+        Expr*           alignof_expr;
+        Typespec*       alignof_type;
+
+        Expr*           typeof_expr;
     };
 };
 
 
 Expr* expr_list(Expr** exprs, int expr_count);
 Expr* expr_int(u64 value);
+Expr* expr_bool(bool value);
+Expr* expr_null(void);
 Expr* expr_flt(double value);
 Expr* expr_str(const char* str);
 Expr* expr_name(const char* name);
@@ -286,7 +299,10 @@ Expr* expr_cast(Typespec* type, Expr* expr);
 Expr* expr_index(Expr* expr, Expr* index);
 Expr* expr_compound(Typespec* type, Compound_Initializer* initializers, int initializer_count);
 Expr* expr_decl(Decl* decl);
-Expr* expr_assignment(Token_Kind op, Expr* left, Expr* right);
+Expr* expr_sizeof_expr(Expr* expr);
+Expr* expr_sizeof_type(Typespec* type);
+Expr* expr_alignof_expr(Expr* expr);
+Expr* expr_alignof_type(Typespec* type);
 
 // Print functions
 //

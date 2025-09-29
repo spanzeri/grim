@@ -5,9 +5,7 @@
 #ifndef GRIMC_COMMON_H
 #define GRIMC_COMMON_H
 
-#include <errno.h>
 #include <float.h>
-#include <math.h>
 #include <stdalign.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -24,20 +22,23 @@
 #define STATIC_ASSERT(cond, ...) _Static_assert((cond), #cond)
 
 #ifdef _MSC_VER
-    #define DEBUGBREAK() __debugbreak()
+    #define DEBUGBREAK(...)     __debugbreak()
+    #define UNREACHABLE(...)    __assume(0)
 #elif defined(__GNUC__) || defined(__clang__)
     #if defined(__i386__) || defined(__x86_64__) \
         || defined(__amd64__) || defined(__x86_64)
-        #define DEBUGBREAK() __asm__ volatile("int $3")
+        #define DEBUGBREAK(...) __asm__ volatile("int $3")
     #elif defined(__aarch64__)
-        #define DEBUGBREAK() __asm__ volatile("brk #0")
+        #define DEBUGBREAK(...) __asm__ volatile("brk #0")
     #elif defined(__arm__)
-        #define DEBUGBREAK() __asm__ volatile("bkpt #0")
+        #define DEBUGBREAK(...) __asm__ volatile("bkpt #0")
     #else
-        #define DEBUGBREAK() __builtin_trap()
+        #define DEBUGBREAK(...) __builtin_trap()
     #endif
+    #define UNREACHABLE(...)    __builtin_unreachable()
 #else
-    #define DEBUGBREAK() (*(volatile int *)0 = 0xDEADC0DE)
+    #define DEBUGBREAK(...)     (*(volatile int *)0 = 0xDEADC0DE)
+    #define UNREACHABLE(...)    (*(volatile int *)0 = 0xDEADC0DE)
 #endif
 
 #define __ASSERT_FAIL(cond_str, ...)                                                    \
@@ -68,6 +69,7 @@
 #endif
 
 #define NOT_IMPLEMENTED() __ASSERT_FAIL("Not implemented")
+
 
 #if !defined(NDEBUG)
     #define ENABLE_TESTS 1
@@ -143,13 +145,28 @@ void fatal__impl(const char *file, int line, const char *fmt, ...);
 void *xmalloc(usize size);
 void *xrealloc(void *ptr, usize size);
 
+typedef struct Arena {
+    u8* ptr;
+    u8* end;
+    u8** blocks;
+} Arena;
+
+enum {
+    ARENA_BLOCK_SIZE = 1 * 1024 * 1024,
+    ARENA_ALIGNMENT  = 8,
+};
+
+void    arena_grow(Arena* arena, usize min_size);
+void*   arena_alloc(Arena* arena, usize size);
+void    arena_reset(Arena* arena);
+
 //
 // Dynamic Array
 //
 
 typedef struct DArray_Header {
-    usize   len;
-    usize   cap;
+    int len;
+    int cap;
 } DArray_Header;
 
 #define darray__header(da)          (((DArray_Header *)(da)) - 1)
@@ -173,7 +190,9 @@ typedef struct DArray_Header {
         darray_pop(da);                                         \
     } while (0)
 
-void *darray__grow(void *da, usize len, usize elem_size);
+#define darray_byte_size(da)        ((usize)darray_len(da) * sizeof(*(da)))
+
+void *darray__grow(void *da, int len, usize elem_size);
 
 //
 // Strings
@@ -220,6 +239,8 @@ const char *str_intern      (const char *str);
 //
 // Error reporting
 //
+
+extern bool break_on_syntax_error;
 
 PRINTF_LIKE(1, 2)
 void syntax_error(const char *fmt, ...);

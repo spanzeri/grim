@@ -1,32 +1,50 @@
 #include "ast.h"
 
+thread_local Arena* ast_arena;
+
+void ast_set_arena(Arena* arena) {
+    ast_arena = arena;
+}
+
+void* ast_alloc(size_t size) {
+    ASSERT(ast_arena != NULL, "AST arena is not set");
+    return arena_alloc(ast_arena, size);
+}
+
+void* ast_dup(const void* src, size_t size) {
+    ASSERT(ast_arena != NULL, "AST arena is not set");
+    void* dst = arena_alloc(ast_arena, size);
+    memcpy(dst, src, size);
+    return dst;
+}
+
 //
 // Node allocation
 //
 
 static Stmt* new_stmt(Stmt_Kind kind) {
-    Stmt* stmt = xmalloc(sizeof(Stmt));
+    Stmt* stmt = ast_alloc(sizeof(Stmt));
     memset(stmt, 0, sizeof(Stmt));
     stmt->kind = kind;
     return stmt;
 }
 
 static Typespec* new_typespec(Typespec_Kind kind) {
-    Typespec* ts = xmalloc(sizeof(Typespec));
+    Typespec* ts = ast_alloc(sizeof(Typespec));
     memset(ts, 0, sizeof(Typespec));
     ts->kind = kind;
     return ts;
 }
 
 static Decl* new_decl(Decl_Kind kind) {
-    Decl* decl = xmalloc(sizeof(Decl));
+    Decl* decl = ast_alloc(sizeof(Decl));
     memset(decl, 0, sizeof(Decl));
     decl->kind = kind;
     return decl;
 }
 
 static Expr* new_expr(Expr_Kind kind) {
-    Expr* expr = xmalloc(sizeof(Expr));
+    Expr* expr = ast_alloc(sizeof(Expr));
     memset(expr, 0, sizeof(Expr));
     expr->kind = kind;
     return expr;
@@ -36,10 +54,11 @@ static Expr* new_expr(Expr_Kind kind) {
 // Stmt
 //
 
-Stmt* stmt_assignment(Token_Kind op, Expr* left, Expr* right) {
+Stmt* stmt_assignment(Token_Kind op, Expr* left, Typespec* type, Expr* right) {
     Stmt* stmt = new_stmt(STMT_ASSIGNMENT);
     stmt->assignment.op    = op;
     stmt->assignment.left  = left;
+    stmt->assignment.type  = type;
     stmt->assignment.right = right;
     return stmt;
 }
@@ -134,9 +153,8 @@ Typespec* typespec_pointer(Typespec* base, bool is_const) {
 // Decl
 //
 
-Decl* decl_enum(const char* name, Enum_Item* items, int item_count, Proc_Decl* methods, int method_count) {
+Decl* decl_enum(Enum_Item* items, int item_count, Proc_Decl* methods, int method_count) {
     Decl* decl = new_decl(DECL_ENUM);
-    decl->name = name;
     decl->enum_decl.items        = items;
     decl->enum_decl.item_count   = item_count;
     decl->enum_decl.methods      = methods;
@@ -144,9 +162,8 @@ Decl* decl_enum(const char* name, Enum_Item* items, int item_count, Proc_Decl* m
     return decl;
 }
 
-Decl* decl_struct(const char* name, Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count) {
+Decl* decl_struct(Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count) {
     Decl* decl = new_decl(DECL_STRUCT);
-    decl->name = name;
     decl->aggregate_decl.items        = items;
     decl->aggregate_decl.item_count   = item_count;
     decl->aggregate_decl.methods      = methods;
@@ -154,9 +171,8 @@ Decl* decl_struct(const char* name, Aggregate_Item* items, int item_count, Proc_
     return decl;
 }
 
-Decl* decl_union(const char* name, Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count) {
+Decl* decl_union(Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count) {
     Decl* decl = new_decl(DECL_UNION);
-    decl->name = name;
     decl->aggregate_decl.items        = items;
     decl->aggregate_decl.item_count   = item_count;
     decl->aggregate_decl.methods      = methods;
@@ -164,9 +180,8 @@ Decl* decl_union(const char* name, Aggregate_Item* items, int item_count, Proc_D
     return decl;
 }
 
-Decl* decl_proc(const char* name, Aggregate_Item* args, int arg_count, Typespec* return_type, Stmt* body) {
+Decl* decl_proc(Aggregate_Item* args, int arg_count, Typespec* return_type, Stmt* body) {
     Decl* decl = new_decl(DECL_PROC);
-    decl->name = name;
     decl->proc_decl.args         = args;
     decl->proc_decl.arg_count    = arg_count;
     decl->proc_decl.return_type  = return_type;
@@ -188,6 +203,17 @@ Expr* expr_list(Expr** exprs, int expr_count) {
 Expr* expr_int(u64 value) {
     Expr* expr = new_expr(EXPR_INT);
     expr->ivalue = value;
+    return expr;
+}
+
+Expr* expr_bool(bool value) {
+    Expr* expr = new_expr(EXPR_BOOL);
+    expr->bvalue = value;
+    return expr;
+}
+
+Expr* expr_null(void) {
+    Expr* expr = new_expr(EXPR_NULL);
     return expr;
 }
 
@@ -268,12 +294,28 @@ Expr* expr_decl(Decl* decl) {
     return expr;
 }
 
-Expr* expr_assignment(Token_Kind op, Expr* left, Expr* right) {
-    Expr* expr = new_expr(EXPR_ASSIGNMENT);
-    expr->assignment.op    = op;
-    expr->assignment.left  = left;
-    expr->assignment.right = right;
-    return expr;
+Expr* expr_sizeof_expr(Expr* expr) {
+    Expr* e = new_expr(EXPR_SIZEOF_EXPR);
+    e->sizeof_expr = expr;
+    return e;
+}
+
+Expr* expr_sizeof_type(Typespec* type) {
+    Expr* e = new_expr(EXPR_SIZEOF_TYPE);
+    e->sizeof_type = type;
+    return e;
+}
+
+Expr* expr_alignof_expr(Expr* expr) {
+    Expr* e = new_expr(EXPR_ALIGNOF_EXPR);
+    e->alignof_expr = expr;
+    return e;
+}
+
+Expr* expr_alignof_type(Typespec* type) {
+    Expr* e = new_expr(EXPR_ALIGNOF_TYPE);
+    e->alignof_type = type;
+    return e;
 }
 
 //
@@ -291,7 +333,14 @@ void print_stmt(Stmt* stmt, int indent) {
             printf("(%s ", token_kind_to_string(stmt->assignment.op));
             print_expr(stmt->assignment.left, 0);
             printf(" ");
-            print_expr(stmt->assignment.right, 0);
+            if (stmt->assignment.type) {
+                printf("(:");
+                print_typespec(stmt->assignment.type, 0);
+                printf(")");
+            }
+            if (stmt->assignment.right) {
+                print_expr(stmt->assignment.right, 0);
+            }
             printf(")");
             break;
 
@@ -463,40 +512,41 @@ void print_decl(Decl* decl, int indent) {
         case DECL_NONE: ASSERT_ALWAYS("DECL_NONE"); break;
 
         case DECL_ENUM: {
-            printf("(enum %s\n", decl->name);
+            printf("(enum\n");
             for (int i = 0; i < decl->enum_decl.item_count; i++) {
+                if (i != 0) { printf("\n"); }
                 Enum_Item* item = &decl->enum_decl.items[i];
                 printf("%*s%.*s", indent + 2, "", item->name.len, item->name.data);
                 if (item->value) {
                     printf(" = ");
                     print_expr(item->value, 0);
                 }
-                printf("\n");
             }
             for (int i = 0; i < decl->enum_decl.method_count; i++) {
+                if (i != 0 || decl->enum_decl.item_count == 0) { printf("\n"); }
                 print_decl((Decl*)&decl->enum_decl.methods[i], indent + 2);
-                printf("\n");
             }
-            printf("%*s)\n", indent, "");
+            printf(")\n");
 
         } break;
 
         case DECL_STRUCT:
         case DECL_UNION: {
             const char* kind_str = decl->kind == DECL_STRUCT ? "struct" : "union";
-            printf("(%s %s\n", kind_str, decl->name);
+            printf("(%s\n", kind_str);
             for (int i = 0; i < decl->aggregate_decl.item_count; i++) {
+                if (i != 0) { printf("\n"); }
                 print_aggregate_item(&decl->aggregate_decl.items[i], indent + 2);
             }
             for (int i = 0; i < decl->aggregate_decl.method_count; i++) {
+                if (i != 0 || decl->aggregate_decl.item_count == 0) { printf("\n"); }
                 print_decl((Decl*)&decl->aggregate_decl.methods[i], indent + 2);
-                printf("\n");
             }
-            printf("%*s)\n", indent, "");
+            printf(")\n");
         } break;
 
         case DECL_PROC: {
-            printf("(proc %s (", decl->name);
+            printf("(proc (");
             for (int i = 0; i < decl->proc_decl.arg_count; i++) {
                 if (i != 0) {
                     printf(", ");
@@ -536,6 +586,14 @@ void print_expr(Expr* expr, int indent) {
 
         case EXPR_INT:
             printf("%llu", expr->ivalue);
+            break;
+
+        case EXPR_BOOL:
+            printf(expr->bvalue ? "true" : "false");
+            break;
+
+        case EXPR_NULL:
+            printf("null");
             break;
 
         case EXPR_FLT:
@@ -589,6 +647,34 @@ void print_expr(Expr* expr, int indent) {
             print_typespec(expr->cast.type, 0);
             printf(" ");
             print_expr(expr->cast.expr, 0);
+            printf(")");
+            break;
+
+        case EXPR_DECL:
+            print_decl(expr->decl, 0);
+            break;
+
+        case EXPR_SIZEOF_EXPR:
+            printf("(sizeof_expr ");
+            print_expr(expr->sizeof_expr, 0);
+            printf(")");
+            break;
+
+        case EXPR_SIZEOF_TYPE:
+            printf("(sizeof_type ");
+            print_typespec(expr->sizeof_type, 0);
+            printf(")");
+            break;
+
+        case EXPR_ALIGNOF_EXPR:
+            printf("(alignof_expr ");
+            print_expr(expr->alignof_expr, 0);
+            printf(")");
+            break;
+
+        case EXPR_ALIGNOF_TYPE:
+            printf("(alignof_type ");
+            print_typespec(expr->alignof_type, 0);
             printf(")");
             break;
 
@@ -704,7 +790,10 @@ static void test_typespec(void) {
 }
 
 TEST(ast) {
+    Arena test_arena = {0};
+    ast_set_arena(&test_arena);
     test_expr();
     test_typespec();
+    arena_reset(&test_arena);
 }
 

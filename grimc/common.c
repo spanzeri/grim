@@ -28,16 +28,54 @@ void *xrealloc(void *ptr, usize size) {
     return new_ptr;
 }
 
-void *darray__grow(void *da, usize len, usize elem_size) {
-    usize curr_cap = darray_cap(da);
-    usize next_cap = curr_cap + (curr_cap >> 1);
+static usize align_up(usize ptr, usize alignment) {
+    usize mask = alignment - 1;
+    return (ptr + mask) & ~mask;
+}
+
+static u8* align_ptr_up(void* ptr, usize alignment) {
+    usize mask = alignment - 1;
+    return (u8*)((usize)((u8*)ptr + mask) & ~mask);
+}
+
+void arena_grow(Arena* arena, usize min_size) {
+    usize block_size = align_up(MAX(ARENA_BLOCK_SIZE, min_size), 4096);
+    arena->ptr = xmalloc(block_size);
+    arena->end = arena->ptr + block_size;
+    darray_add(arena->blocks, arena->ptr);
+}
+
+void* arena_alloc(Arena* arena, usize size) {
+    u8* ptr = align_ptr_up(arena->ptr, ARENA_ALIGNMENT);
+    if (ptr + size > arena->end) {
+        arena_grow(arena, size + ARENA_ALIGNMENT);
+        ptr = align_ptr_up(arena->ptr, ARENA_ALIGNMENT);
+        ASSERT(ptr + size <= arena->end);
+    }
+    arena->ptr = ptr + size;
+    return ptr;
+}
+
+void arena_reset(Arena* arena) {
+    for (int i = 0; i < darray_len(arena->blocks); i++) {
+        free(arena->blocks[i]);
+    }
+    darray_free(arena->blocks);
+    arena->ptr    = NULL;
+    arena->end    = NULL;
+    arena->blocks = NULL;
+}
+
+void *darray__grow(void *da, int len, usize elem_size) {
+    int curr_cap = darray_cap(da);
+    int next_cap = curr_cap + (curr_cap >> 1);
     next_cap = MAX(next_cap, 16);       // At least 16 elements
     next_cap = MAX(next_cap, len);      // Make sure we can fit 'len' elements
 
     ASSERT(next_cap > curr_cap);
     ASSERT(next_cap >= len);
 
-    usize new_size = sizeof(DArray_Header) + elem_size * next_cap;
+    usize new_size = sizeof(DArray_Header) + elem_size * (size_t)next_cap;
 
     DArray_Header *new_hdr = NULL;
     if (da) {
@@ -54,14 +92,14 @@ void *darray__grow(void *da, usize len, usize elem_size) {
 
 static void darray_test(int argc, const char *argv[]) {
     const char **arr = NULL;
-    ASSERT(darray_len(arr) == 0, "Initial arr len = %td, expected 0", darray_len(arr));
+    ASSERT(darray_len(arr) == 0, "Initial arr len = %d, expected 0", darray_len(arr));
     darray_add(arr, "Hello");
     darray_add(arr, "World");
     for (int i = 0; i < argc; i++) {
         darray_add(arr, argv[i]);
     }
-    for (usize i = 0; i < darray_len(arr); i++) {
-        printf("Array arr[%zu] = %s\n", i, arr[i]);
+    for (int i = 0; i < darray_len(arr); i++) {
+        printf("Array arr[%d] = %s\n", i, arr[i]);
     }
 
     const char *extra[] = {
@@ -75,7 +113,7 @@ static void darray_test(int argc, const char *argv[]) {
     }
 
     darray_free(arr);
-    ASSERT(darray_len(arr) == 0, "After free arr len = %td, expected 0", darray_len(arr));
+    ASSERT(darray_len(arr) == 0, "After free arr len = %d, expected 0", darray_len(arr));
     ASSERT(arr == NULL, "After free arr = %p, expected NULL", (void*)arr);
 
     enum { ARR_COUNT = 1024 };
@@ -83,15 +121,15 @@ static void darray_test(int argc, const char *argv[]) {
     for (int i = 0; i < ARR_COUNT; i++) {
         darray_add(int_arr, i * 2);
     }
-    ASSERT(darray_len(int_arr) == ARR_COUNT, "int_arr len = %td, expected %d", darray_len(int_arr), ARR_COUNT);
+    ASSERT(darray_len(int_arr) == ARR_COUNT, "int_arr len = %d, expected %d", darray_len(int_arr), ARR_COUNT);
     for (int i = 0; i < ARR_COUNT; i++) {
         ASSERT(int_arr[i] == i * 2, "int_arr[%d] = %d, expected %d", i, int_arr[i], i * 2);
     }
 
-    printf("Array length = %td, cap = %td\n", darray_len(arr), darray_cap(arr));
+    printf("Array length = %d, cap = %d\n", darray_len(arr), darray_cap(arr));
 
     darray_free(int_arr);
-    ASSERT(darray_len(int_arr) == 0, "After free int_arr len = %td, expected 0", darray_len(int_arr));
+    ASSERT(darray_len(int_arr) == 0, "After free int_arr len = %d, expected 0", darray_len(int_arr));
     ASSERT(int_arr == NULL, "After free int_arr = %p, expected NULL", (void*)int_arr);
 }
 
@@ -141,6 +179,8 @@ static void str_intern_test(void) {
 // Error reporting
 //
 
+bool break_on_syntax_error = false;
+
 PRINTF_LIKE(1, 2)
 void syntax_error(const char *fmt, ...)  {
     fprintf(stderr, "Syntax error: ");
@@ -149,6 +189,9 @@ void syntax_error(const char *fmt, ...)  {
     vfprintf(stderr, fmt, args);
     va_end(args);
     fputc('\n', stderr);
+    if (break_on_syntax_error) {
+        DEBUGBREAK();
+    }
 }
 
 //

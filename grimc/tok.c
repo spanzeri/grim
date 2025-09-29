@@ -34,7 +34,7 @@ const char* token_names[TOK_COUNT] = {
     [TOK_STRING_LITERAL]  = "STRING_LITERAL",
     [TOK_IDENTIFIER]      = "IDENTIFIER",
     [TOK_VAR_ASSIGN]      = ":=",
-    [TOK_CONST_ASSIGN]    = "::=",
+    [TOK_CONST_ASSIGN]    = "::",
     [TOK_EQ]              = "==",
     [TOK_NEQ]             = "!=",
     [TOK_LTEQ]            = "<=",
@@ -87,6 +87,12 @@ const char* keyword_to_string(Keyword kw) {
         case KW_ENUM:       return "ENUM";
         case KW_STRUCT:     return "STRUCT";
         case KW_UNION:      return "UNION";
+        case KW_CAST:       return "CAST";
+        case KW_SIZEOF:     return "SIZEOF";
+        case KW_ALIGNOF:    return "ALIGNOF";
+        case KW_TRUE:       return "TRUE";
+        case KW_FALSE:      return "FALSE";
+        case KW_NULL:       return "NULL";
     }
 }
 

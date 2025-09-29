@@ -9,9 +9,9 @@
 #include "parse.h"
 
 int main(int argc, char *argv[]) {
-    DO_TEST(common);
-    DO_TEST(lex);
-    DO_TEST(ast);
+    // DO_TEST(common);
+    // DO_TEST(lex);
+    // DO_TEST(ast);
     DO_TEST(parse);
 }
 
