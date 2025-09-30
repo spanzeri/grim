@@ -5,8 +5,6 @@
 #include "lex.h"
 
 void    ast_set_arena(Arena* arena);
-void*   ast_dup(const void* src, size_t size);
-void*   ast_alloc(size_t size);
 
 typedef struct Expr Expr;
 typedef struct Decl Decl;
@@ -15,7 +13,9 @@ typedef struct Typespec Typespec;
 
 typedef enum Stmt_Kind {
     STMT_NONE = 0,
-    STMT_ASSIGNMENT,
+    STMT_ASSIGN,
+    STMT_DECL_VAR,
+    STMT_DECL_CONST,
     STMT_EXPR,
     STMT_RETURN,
     STMT_BREAK,
@@ -42,9 +42,14 @@ struct Stmt {
         struct {
             Token_Kind  op;
             Expr*       left;
-            Typespec*   type;
             Expr*       right;
         } assignment;
+
+        struct {
+            Expr*       left;
+            Typespec*   type;
+            Expr*       right;
+        } decl;
 
         Expr* expr;
 
@@ -76,7 +81,9 @@ struct Stmt {
     };
 };
 
-Stmt* stmt_assignment   (Token_Kind op, Expr* left, Typespec* type, Expr* right);
+Stmt* stmt_assign       (Token_Kind op, Expr* left, Expr* right);
+Stmt* stmt_decl_var     (Expr* left, Typespec* type, Expr* right);
+Stmt* stmt_decl_const   (Expr* left, Typespec* type, Expr* right);
 Stmt* stmt_expr         (Expr* expr);
 Stmt* stmt_return       (Expr* expr);
 Stmt* stmt_block        (Stmt** stmts, int stmt_count);
@@ -291,7 +298,7 @@ Expr* expr_null(void);
 Expr* expr_flt(double value);
 Expr* expr_str(const char* str);
 Expr* expr_name(const char* name);
-Expr* expr_call(const char* name, Expr** arg_list, int arg_count);
+Expr* expr_call(const char* name, Expr** args, int arg_count);
 Expr* expr_unary(Token_Kind op, Expr* operand);
 Expr* expr_binary(Token_Kind op, Expr* left, Expr* right);
 Expr* expr_ternary(Expr* condition, Expr* then_expr, Expr* else_expr);

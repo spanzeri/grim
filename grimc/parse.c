@@ -217,7 +217,7 @@ static Decl* parse_proc_decl(Parse_Context* p) {
         }
     }
     Stmt* body = parse_block_stmt(p);
-    return decl_proc(ast_dup(args, darray_byte_size(args)), darray_len(args), return_type, body);
+    return decl_proc(args, darray_len(args), return_type, body);
 }
 
 static Decl* parse_struct_or_union_decl(Parse_Context* p) {
@@ -250,12 +250,8 @@ static Decl* parse_struct_or_union_decl(Parse_Context* p) {
     consume(p, '}', "Expected '}' after %s body", is_struct ? "struct" : "union");
 
     return is_struct
-        ? decl_struct(
-            ast_dup(items, darray_byte_size(items)), darray_len(items),
-            ast_dup(methods, darray_byte_size(methods)), darray_len(methods))
-        : decl_union(
-            ast_dup(items, darray_byte_size(items)), darray_len(items),
-            ast_dup(methods, darray_byte_size(methods)), darray_len(methods));
+        ? decl_struct(items, darray_len(items), methods, darray_len(methods))
+        : decl_union(items, darray_len(items), methods, darray_len(methods));
 
 }
 
@@ -295,9 +291,7 @@ static Decl* parse_enum_decl(Parse_Context* p) {
     }
 
     consume(p, '}', "Expected '}' after enum body");
-    return decl_enum(
-        ast_dup(items, darray_byte_size(items)), darray_len(items),
-        ast_dup(methods, darray_byte_size(methods)), darray_len(methods));
+    return decl_enum(items, darray_len(items), methods, darray_len(methods));
 }
 
 static bool parse_function_arg(Parse_Context* p, Aggregate_Item* out_item) {
@@ -351,7 +345,7 @@ static bool try_parse_aggregate_item(Parse_Context* p, Aggregate_Item* out_item)
         return false;
     }
 
-    out_item->names         = ast_dup(names, darray_byte_size(names));
+    out_item->names         = names;
     out_item->names_count   = (int)darray_len(names);
     out_item->type          = type;
     out_item->default_value = default_value;
@@ -519,7 +513,7 @@ static Expr* parse_expr_precedence(Parse_Context* p, bool is_lhs, int min_prec) 
                 if (!match_token(p, ',')) { break; }
             }
             consume(p, ')', "Expected ')' after function call arguments");
-            left = expr_call(left->name, ast_dup(args, darray_byte_size(args)), darray_len(args));
+            left = expr_call(left->name, args, darray_len(args));
             continue;
         }
 
@@ -574,7 +568,7 @@ static Expr* parse_list_expr(Parse_Context* p) {
         return single;
     }
 
-    return expr_list(ast_dup(elements, darray_byte_size(elements)), darray_len(elements));
+    return expr_list(elements, darray_len(elements));
 }
 
 //
@@ -588,8 +582,6 @@ static Stmt* parse_expr_or_assignment_stmt(Parse_Context* p) {
     }
 
     switch (p->current.kind) {
-        case TOK_VAR_ASSIGN:
-        case TOK_CONST_ASSIGN:
         case '=':
         case TOK_ADD_ASSIGN:
         case TOK_SUB_ASSIGN:
@@ -610,11 +602,31 @@ static Stmt* parse_expr_or_assignment_stmt(Parse_Context* p) {
                 syntax_error("Expected right-hand side expression in assignment");
                 return NULL;
             }
-            if ((rhs_list->kind != EXPR_DECL) &&
-                (rhs_list->kind == EXPR_LIST && rhs_list->list.exprs[rhs_list->list.expr_count - 1]->kind != EXPR_DECL)) {
-                consume(p, ';', "Expected ';' after assignment statement");
+            consume(p, ';', "Expected ';' after assignment statement");
+            return stmt_assign(assign_op, lhs_list, rhs_list);
+        }
+
+        case TOK_VAR_ASSIGN:
+        case TOK_CONST_ASSIGN: {
+            bool is_const = p->current.kind == TOK_CONST_ASSIGN;
+            advance(p);
+            Expr* rhs_list = parse_list_expr(p);
+            if (!rhs_list) {
+                syntax_error("Expected right-hand side expression in declaration statement");
+                return NULL;
             }
-            return stmt_assignment(assign_op, lhs_list, NULL, rhs_list);
+            bool can_skip_semicolon =
+                (rhs_list->kind == EXPR_DECL) ||
+                (rhs_list->kind == EXPR_LIST && rhs_list->list.exprs[rhs_list->list.expr_count - 1]->kind == EXPR_DECL);
+
+            if (!can_skip_semicolon)
+                consume(p, ';', "Expected ';' after declaration statement");
+
+            if (is_const) {
+                return stmt_decl_const(lhs_list, NULL, rhs_list);
+            } else {
+                return stmt_decl_var(lhs_list, NULL, rhs_list);
+            }
         }
 
         case ':': {
@@ -626,14 +638,14 @@ static Stmt* parse_expr_or_assignment_stmt(Parse_Context* p) {
             }
 
             if (match_token(p, ';')) {
-                return stmt_assignment(TOK_CONST_ASSIGN, lhs_list, type, NULL);
+                return stmt_decl_var(lhs_list, type, NULL);
             }
 
             advance(p);
-            Token_Kind op;
+            bool is_const = false;
             switch (p->previous.kind) {
-                case ':': op = TOK_CONST_ASSIGN; break;
-                case '=': op = TOK_VAR_ASSIGN;   break;
+                case ':': is_const = true;  break;
+                case '=': is_const = false; break;
                 default:
                     syntax_error("Expected ':', ':=', or '=' in declaration statement");
                     return NULL;
@@ -645,7 +657,17 @@ static Stmt* parse_expr_or_assignment_stmt(Parse_Context* p) {
                 return NULL;
             }
 
-            return stmt_assignment(op, lhs_list, type, rhs_list);
+            bool can_skip_semicolon =
+                (rhs_list->kind == EXPR_DECL) ||
+                (rhs_list->kind == EXPR_LIST && rhs_list->list.exprs[rhs_list->list.expr_count - 1]->kind == EXPR_DECL);
+            if (!can_skip_semicolon)
+                consume(p, ';', "Expected ';' after declaration statement");
+
+            if (is_const) {
+                return stmt_decl_const(lhs_list, type, rhs_list);
+            } else {
+                return stmt_decl_var(lhs_list, type, rhs_list);
+            }
         } break;
 
         default:
@@ -773,7 +795,7 @@ static Stmt* parse_block_stmt(Parse_Context* p) {
         }
     }
     consume(p, '}', "Expected '}' to end block statement");
-    return stmt_block(ast_dup(stmts, darray_byte_size(stmts)), darray_len(stmts));
+    return stmt_block(stmts, darray_len(stmts));
 }
 
 //

@@ -6,17 +6,19 @@ void ast_set_arena(Arena* arena) {
     ast_arena = arena;
 }
 
-void* ast_alloc(size_t size) {
+static void* ast_alloc(size_t size) {
     ASSERT(ast_arena != NULL, "AST arena is not set");
     return arena_alloc(ast_arena, size);
 }
 
-void* ast_dup(const void* src, size_t size) {
+static void* ast_dup(const void* src, size_t size) {
     ASSERT(ast_arena != NULL, "AST arena is not set");
     void* dst = arena_alloc(ast_arena, size);
     memcpy(dst, src, size);
     return dst;
 }
+
+#define AST_DUP(ptr, count) ast_dup((ptr), sizeof(*(ptr)) * (size_t)(count))
 
 //
 // Node allocation
@@ -54,13 +56,28 @@ static Expr* new_expr(Expr_Kind kind) {
 // Stmt
 //
 
-Stmt* stmt_assignment(Token_Kind op, Expr* left, Typespec* type, Expr* right) {
-    Stmt* stmt = new_stmt(STMT_ASSIGNMENT);
+Stmt* stmt_assign(Token_Kind op, Expr* left, Expr* right) {
+    Stmt* stmt = new_stmt(STMT_ASSIGN);
     stmt->assignment.op    = op;
     stmt->assignment.left  = left;
-    stmt->assignment.type  = type;
     stmt->assignment.right = right;
     return stmt;
+}
+
+static Stmt* new_stmt_decl(Stmt_Kind kind, Expr* left, Typespec* type, Expr* right) {
+    Stmt* stmt = new_stmt(kind);
+    stmt->decl.left  = left;
+    stmt->decl.type  = type;
+    stmt->decl.right = right;
+    return stmt;
+}
+
+Stmt* stmt_decl_var(Expr* left, Typespec* type, Expr* right) {
+    return new_stmt_decl(STMT_DECL_VAR, left, type, right);
+}
+
+Stmt* stmt_decl_const(Expr* left, Typespec* type, Expr* right) {
+    return new_stmt_decl(STMT_DECL_CONST, left, type, right);
 }
 
 Stmt* stmt_expr(Expr* expr) {
@@ -89,7 +106,7 @@ Stmt* stmt_continue(const char* label) {
 
 Stmt* stmt_block(Stmt** stmts, int stmt_count) {
     Stmt* stmt = new_stmt(STMT_BLOCK);
-    stmt->block.stmts = stmts;
+    stmt->block.stmts      = AST_DUP(stmts, stmt_count);
     stmt->block.stmt_count = stmt_count;
     return stmt;
 }
@@ -136,8 +153,8 @@ Typespec* typespec_array(Typespec* base, Expr* size, bool is_const) {
 
 Typespec* typespec_proc(Typespec** params, int param_count, Typespec* return_type) {
     Typespec* ts = new_typespec(TYPESPEC_PROC);
-    ts->proc.params      = params;
     ts->proc.return_type = return_type;
+    ts->proc.params      = AST_DUP(params, param_count);
     ts->proc.param_count = param_count;
     return ts;
 }
@@ -155,7 +172,7 @@ Typespec* typespec_pointer(Typespec* base, bool is_const) {
 
 Decl* decl_enum(Enum_Item* items, int item_count, Proc_Decl* methods, int method_count) {
     Decl* decl = new_decl(DECL_ENUM);
-    decl->enum_decl.items        = items;
+    decl->enum_decl.items        = AST_DUP(items, item_count);
     decl->enum_decl.item_count   = item_count;
     decl->enum_decl.methods      = methods;
     decl->enum_decl.method_count = method_count;
@@ -164,7 +181,7 @@ Decl* decl_enum(Enum_Item* items, int item_count, Proc_Decl* methods, int method
 
 Decl* decl_struct(Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count) {
     Decl* decl = new_decl(DECL_STRUCT);
-    decl->aggregate_decl.items        = items;
+    decl->aggregate_decl.items        = AST_DUP(items, item_count);
     decl->aggregate_decl.item_count   = item_count;
     decl->aggregate_decl.methods      = methods;
     decl->aggregate_decl.method_count = method_count;
@@ -173,16 +190,16 @@ Decl* decl_struct(Aggregate_Item* items, int item_count, Proc_Decl* methods, int
 
 Decl* decl_union(Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count) {
     Decl* decl = new_decl(DECL_UNION);
-    decl->aggregate_decl.items        = items;
+    decl->aggregate_decl.items        = AST_DUP(items, item_count);
     decl->aggregate_decl.item_count   = item_count;
-    decl->aggregate_decl.methods      = methods;
+    decl->aggregate_decl.methods      = AST_DUP(methods, method_count);
     decl->aggregate_decl.method_count = method_count;
     return decl;
 }
 
 Decl* decl_proc(Aggregate_Item* args, int arg_count, Typespec* return_type, Stmt* body) {
     Decl* decl = new_decl(DECL_PROC);
-    decl->proc_decl.args         = args;
+    decl->proc_decl.args         = AST_DUP(args, arg_count);
     decl->proc_decl.arg_count    = arg_count;
     decl->proc_decl.return_type  = return_type;
     decl->proc_decl.body         = body;
@@ -195,7 +212,7 @@ Decl* decl_proc(Aggregate_Item* args, int arg_count, Typespec* return_type, Stmt
 
 Expr* expr_list(Expr** exprs, int expr_count) {
     Expr* expr = new_expr(EXPR_LIST);
-    expr->list.exprs      = exprs;
+    expr->list.exprs      = AST_DUP(exprs, expr_count);
     expr->list.expr_count = expr_count;
     return expr;
 }
@@ -235,10 +252,10 @@ Expr* expr_name(const char* name) {
     return expr;
 }
 
-Expr* expr_call(const char* name, Expr** arg_list, int arg_count) {
+Expr* expr_call(const char* name, Expr** args, int arg_count) {
     Expr* expr = new_expr(EXPR_CALL);
     expr->call.name      = name;
-    expr->call.args      = arg_list;
+    expr->call.args      = AST_DUP(args, arg_count);
     expr->call.arg_count = arg_count;
     return expr;
 }
@@ -283,7 +300,7 @@ Expr* expr_index(Expr* expr, Expr* index) {
 Expr* expr_compound(Typespec* type, Compound_Initializer* initializers, int initializer_count) {
     Expr* expr = new_expr(EXPR_COMPOUND);
     expr->compound.type              = type;
-    expr->compound.initalizers       = initializers;
+    expr->compound.initalizers       = AST_DUP(initializers, initializer_count);
     expr->compound.initializer_count = initializer_count;
     return expr;
 }
@@ -329,17 +346,28 @@ void print_stmt(Stmt* stmt, int indent) {
     switch (stmt->kind) {
         case STMT_NONE: ASSERT_ALWAYS("STMT_NONE"); break;
 
-        case STMT_ASSIGNMENT:
+        case STMT_ASSIGN:
             printf("(%s ", token_kind_to_string(stmt->assignment.op));
             print_expr(stmt->assignment.left, 0);
-            printf(" ");
-            if (stmt->assignment.type) {
-                printf("(:");
-                print_typespec(stmt->assignment.type, 0);
-                printf(")");
+            print_expr(stmt->assignment.right, 0);
+            printf(")");
+            break;
+
+        case STMT_DECL_VAR:
+        case STMT_DECL_CONST:
+            if (stmt->kind == STMT_DECL_VAR) {
+                printf("(var ");
+            } else {
+                printf("(const ");
             }
-            if (stmt->assignment.right) {
-                print_expr(stmt->assignment.right, 0);
+            print_expr(stmt->decl.left, 0);
+            if (stmt->decl.type) {
+                printf(" :");
+                print_typespec(stmt->decl.type, 0);
+            }
+            if (stmt->decl.right) {
+                printf(" ");
+                print_expr(stmt->decl.right, 0);
             }
             printf(")");
             break;
@@ -375,10 +403,10 @@ void print_stmt(Stmt* stmt, int indent) {
         case STMT_BLOCK:
             printf("(block\n");
             for (int i = 0; i < stmt->block.stmt_count; i++) {
+                if (i != 0) { printf("\n"); }
                 print_stmt(stmt->block.stmts[i], indent + 2);
-                printf("\n");
             }
-            printf("%*s)\n", indent, "");
+            printf(")");
             break;
 
         case STMT_IF:
@@ -526,7 +554,7 @@ void print_decl(Decl* decl, int indent) {
                 if (i != 0 || decl->enum_decl.item_count == 0) { printf("\n"); }
                 print_decl((Decl*)&decl->enum_decl.methods[i], indent + 2);
             }
-            printf(")\n");
+            printf(")");
 
         } break;
 
@@ -542,15 +570,13 @@ void print_decl(Decl* decl, int indent) {
                 if (i != 0 || decl->aggregate_decl.item_count == 0) { printf("\n"); }
                 print_decl((Decl*)&decl->aggregate_decl.methods[i], indent + 2);
             }
-            printf(")\n");
+            printf(")");
         } break;
 
         case DECL_PROC: {
             printf("(proc (");
             for (int i = 0; i < decl->proc_decl.arg_count; i++) {
-                if (i != 0) {
-                    printf(", ");
-                }
+                if (i != 0) { printf(", "); }
                 print_aggregate_item(&decl->proc_decl.args[i], 0);
             }
             printf(")");
@@ -562,7 +588,7 @@ void print_decl(Decl* decl, int indent) {
                 printf("\n");
                 print_stmt(decl->proc_decl.body, indent + 2);
             }
-            printf("%*s)\n", indent, "");
+            printf(")");
         } break;
     }
 }
