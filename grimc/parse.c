@@ -1,59 +1,502 @@
 #include "parse.h"
-#include "lex.h"
-#include "ast.h"
 
-static int          get_precedence(Token_Kind kind);
-static void         advance(Parse_Context* p);
+static Stmt*    parse_stmt(Parser* p);
+static void     advance(Parser* p);
+static Token    peek(Parser* p, int offset);
+static bool     match(Parser* p, Token_Kind kind);
+static bool     match_keyword(Parser* p, Keyword kw);
+static bool     consume(Parser* p, Token_Kind kind, const char* err_msg);
+static bool     consume_keyword(Parser* p, Keyword kw, const char* err_msg);
 
-static Decl*        parse_proc_decl(Parse_Context* p);
-static Decl*        parse_struct_or_union_decl(Parse_Context* p);
-static Decl*        parse_enum_decl(Parse_Context* p);
+static bool     is_keyword(Token tok, Keyword kw);
+static String   dup_string(Arena* arena, String str);
+static void     end_stmt(Parser* p);
 
-static bool         parse_function_arg(Parse_Context* p, Aggregate_Item* out_item);
-static bool         try_parse_aggregate_item(Parse_Context* p, Aggregate_Item* out_item);
+static Stmt*    parse_expr_stmt(Parser* p);
+static Stmt*    parse_return_stmt(Parser* p);
+static Stmt*    parse_if_stmt(Parser* p);
+static Stmt*    parse_for_stmt(Parser* p);
+static Stmt*    parse_switch_stmt(Parser* p);
+static Stmt*    parse_break_stmt(Parser* p);
+static Stmt*    parse_continue_stmt(Parser* p);
 
-static Typespec*    parse_typespec(Parse_Context* p);
+static Expr*    parse_expr(Parser* p);
 
-static Expr*        parse_expr_precedence(Parse_Context* p, bool is_lhs, int precedence);
+Parser parser_init(String source, const char* filepath)
+{
+    Parser parser = (Parser){0};
+    parser.filepath = filepath;
 
-static Stmt*        parse_block_stmt(Parse_Context* p);
+    // Lex all the tokens up front. Make an educated guess at the number of
+    // tokens to avoid too many re-allocations.
+    // @OPTIMIZE: A virtual memory based arena could be used to ensure we never
+    // re-allocate the token array.
+    // @TODO: Verify the heuristic. Is 4 below a good value? Should it be 3 or 5?
+    // Need to take some real-world source files and measure the ratio between
+    // source size and token count.
+    usize source_size = source.len;
+    int estimated_token_count = (int)(source_size / 4); // Average token size
+    darray_reserve(parser.tokens, estimated_token_count);
 
-static bool         match_token(Parse_Context* p, Token_Kind kind);
-static bool         match_keyword(Parse_Context* p, Keyword kw);
-static bool         is_token(Parse_Context* p, Token_Kind kind);
-static bool         is_keyword(Parse_Context* p, Keyword kw);
+    Lexer lexer = lexer_init(source);
+    Token tok;
+    while (lexer_next_token(&lexer, &tok)) {
+        darray_add(parser.tokens, tok);
+        if (tok.kind == TOK_EOF) {
+            break;
+        }
+    }
+    parser.current = darray_len(parser.tokens) > 0 ? parser.tokens[0] : (Token){0};
 
-Parse_Context parse_init(const char* source) {
-    Parse_Context res = (Parse_Context){ .lexer = lexer_init(source) };
-    return res;
+    fprintf(stderr, "Lexed %d tokens from %s\n", darray_len(parser.tokens), filepath);
+
+    return parser;
 }
 
-void parse_shutdown(Parse_Context* pctx) {
-    arena_reset(&pctx->ast_arena);
+void parser_shutdown(Parser* p)
+{
+    arena_reset(&p->string_arena);
+    arena_reset(&p->ast_arena);
 }
 
-void parse_begin(Parse_Context* p) {
-    p->previous = (Token){0};
-    p->current  = lexer_next_token(&p->lexer);
-    ast_set_arena(&p->ast_arena);
+bool parser_is_at_end(Parser* p)
+{
+    return p->tokens[p->tok_index].kind == TOK_EOF;
 }
 
-void parse_end(Parse_Context* p) {
-    ast_set_arena(NULL);
+Stmt* parser_next_stmt(Parser* p)
+{
+    Stmt* stmt = parse_stmt(p);
+    ASSERT(stmt != NULL || parser_is_at_end(p), "Expected statement or end of file");
+    return stmt;
 }
 
-static const int UNARY_PRECEDENCE = 20;
-static const int CALL_PRECEDENCE  = 21;
+static String* get_stmt_label_ptr(Stmt* stmt)
+{
+    switch (stmt->kind) {
+        case STMT_BLOCK: {
+            Block_Stmt* block_stmt = (Block_Stmt*)stmt;
+            return &block_stmt->label;
+        } break;
 
-static int get_precedence(Token_Kind kind) {
+        case STMT_FOR: {
+            For_Stmt* for_stmt = (For_Stmt*)stmt;
+            return &for_stmt->label;
+        } break;
+
+        default:
+            return NULL;
+    }
+}
+
+static void set_stmt_label(Stmt* stmt, String label)
+{
+    String* label_ptr = get_stmt_label_ptr(stmt);
+    if (label_ptr) {
+        *label_ptr = label;
+    }
+}
+
+static String get_stmt_label(Stmt* stmt)
+{
+    String* label_ptr = get_stmt_label_ptr(stmt);
+    if (label_ptr) {
+        return *label_ptr;
+    }
+    return (String){0};
+}
+
+static Stmt* parse_stmt(Parser* p)
+{
+    Token current = {0};
+    Stmt* stmt = NULL;
+
+restart:
+    // Label are unfortunately a bit tricky to handle. We do it here, so we know
+    // by the time we reach the switch statement below, we are done.
+    if (current.kind == TOK_IDENTIFIER && peek(p, 1).kind == ':' &&
+        (peek(p, 2).kind == '{' || is_keyword(peek(p, 2), KW_FOR))) {
+        String label = dup_string(&p->string_arena, current.svalue);
+        advance(p);
+        advance(p);
+        stmt = parse_stmt(p);
+        if (!stmt) { return NULL; }
+
+        if (!str_is_empty(get_stmt_label(stmt))) {
+            syntax_error("Multiple labels on the same block are not allowed.");
+            return NULL;
+        }
+
+        set_stmt_label(stmt, label);
+        return stmt;
+    }
+
+    switch (current.kind) {
+        case ';':
+            advance(p);
+            goto restart;
+            break;
+
+        case TOK_EOF:
+            break;
+
+        case TOK_KEYWORD: {
+            switch (current.keyword) {
+                case KW_RETURN:     return parse_return_stmt(p);
+                case KW_IF:         return parse_if_stmt(p);
+                case KW_FOR:        return parse_for_stmt(p);
+                case KW_SWITCH:     return parse_switch_stmt(p);
+                case KW_BREAK:      return parse_break_stmt(p);
+                case KW_CONTINUE:   return parse_continue_stmt(p);
+                default:            break;
+            }
+        } break;
+
+        case '{': {
+            advance(p); // Consume '{'
+            Stmt** stmts = NULL;
+            while (!parser_is_at_end(p) && p->current.kind != '}') {
+                Stmt* substmt = parse_stmt(p);
+                if (!substmt) {
+                    syntax_error("Expected statement in block");
+                    darray_free(stmts);
+                    return NULL;
+                }
+                darray_add(stmts, substmt);
+            }
+
+            if (!consume(p, '}', "Expected '}' at end of block")) {
+                darray_free(stmts);
+                return NULL;
+            }
+
+            stmt = stmt_block(&p->ast_arena, stmts, darray_len(stmts), (String){0});
+            darray_free(stmts);
+        } break;
+
+        default: {
+            stmt = parse_expr_stmt(p);
+        } break;
+
+    }
+
+    return stmt;
+}
+
+static void advance(Parser* p)
+{
+    if (!parser_is_at_end(p)) {
+        p->tok_index += 1;
+        p->previous = p->current;
+        p->current = p->tokens[p->tok_index];
+    }
+}
+
+static Token peek(Parser* p, int offset)
+{
+    int index = p->tok_index + offset;
+    if (index >= darray_len(p->tokens)) {
+        return (Token){};
+    }
+    return p->tokens[index];
+}
+
+static bool match(Parser* p, Token_Kind kind)
+{
+    if (p->current.kind == kind) {
+        advance(p);
+        return true;
+    }
+    return false;
+}
+
+static bool match_keyword(Parser* p, Keyword kw)
+{
+    if (p->current.kind == TOK_KEYWORD && p->current.keyword == kw) {
+        advance(p);
+        return true;
+    }
+    return false;
+}
+
+static bool consume(Parser* p, Token_Kind kind, const char* err_msg)
+{
+    if (p->current.kind == kind) {
+        advance(p);
+        return true;
+    }
+    syntax_error("%s", err_msg);
+    return false;
+}
+
+static bool consume_keyword(Parser* p, Keyword kw, const char* err_msg)
+{
+    if (p->current.kind == TOK_KEYWORD && p->current.keyword == kw) {
+        advance(p);
+        return true;
+    }
+    syntax_error("%s", err_msg);
+    return false;
+}
+
+static bool is_keyword(Token tok, Keyword kw)
+{
+    return tok.kind == TOK_KEYWORD && tok.keyword == kw;
+}
+
+static String dup_string(Arena* arena, String str)
+{
+    ASSERT(arena);
+    char* buffer = arena_alloc(arena, str.len + 1);
+    memcpy(buffer, str.data, str.len);
+    buffer[str.len] = '\0';
+    return (String){ .data = buffer, .len = str.len };
+}
+
+static void end_stmt(Parser* p)
+{
+    if (match(p, ';')) { return; }
+
+    // @TODO: Get the next token. Get the line number of the next token.
+    // If we are on a new line, return. If we aren't, this is not allowed.
+}
+
+static Stmt* parse_expr_stmt(Parser* p)
+{
+    Stmt* stmt = NULL;
+
+    Expr* expr = parse_expr(p);
+    if (!expr) { return NULL; }
+
+    if (match(p, ':')) {
+        Expr* typespec = parse_expr(p);
+        if (!typespec) {
+            syntax_error("Expected type specifier, '=' or ':' after a declaration.");
+            return NULL;
+        }
+
+        if (match(p, '=')) {
+            Expr* rhs = parse_expr(p);
+            if (rhs == NULL) {
+                syntax_error("Expected expression after '=' in a variable declaration.");
+                return NULL;
+            }
+            stmt = stmt_decl_var(&p->ast_arena, expr, typespec, rhs);
+        }
+        else if (match(p, ':')) {
+            Expr* rhs = parse_expr(p);
+            if (rhs == NULL) {
+                syntax_error("Expected expression after ':' in a constant declaration.");
+                return NULL;
+            }
+            stmt = stmt_decl_const(&p->ast_arena, expr, typespec, rhs);
+        }
+        else {
+            // Only: `name: type`. It must be a variable
+            stmt = stmt_decl_var(&p->ast_arena, expr, typespec, NULL);
+        }
+    }
+    else if (match(p, TOK_VAR_ASSIGN)) {
+        Expr* rhs = parse_expr(p);
+        if (rhs == NULL) {
+            syntax_error("Expected expression after ':=' in a variable assignment.");
+            return NULL;
+        }
+        stmt = stmt_assignment(&p->ast_arena, TOK_VAR_ASSIGN, expr, rhs);
+    }
+    else if (match(p, TOK_CONST_ASSIGN)) {
+        Expr* rhs = parse_expr(p);
+        if (rhs == NULL) {
+            syntax_error("Expected expression after '::' in a constant assignment.");
+            return NULL;
+        }
+        stmt = stmt_assignment(&p->ast_arena, TOK_CONST_ASSIGN, expr, rhs);
+    }
+    else {
+        stmt = stmt_expr(&p->ast_arena, expr);
+    }
+
+    ASSERT(stmt != NULL);
+
+    // Possibly consume the trailing semicolon or end of file.
+    end_stmt(p);
+    return stmt;
+}
+
+static Stmt* parse_return_stmt(Parser* p)
+{
+    if (!match_keyword(p, KW_RETURN)) { return NULL; }
+    Expr* expr = parse_expr(p);
+    Stmt* stmt = stmt_return(&p->ast_arena, expr);
+    end_stmt(p);
+    return stmt;
+}
+
+static Stmt* parse_if_stmt(Parser* p)
+{
+    if (!match_keyword(p, KW_IF)) { return NULL; }
+    Expr* init = NULL;
+    Expr* cond = parse_expr(p);
+    if (!cond) {
+        syntax_error("Expected condition or `init; condition` after `if`");
+        return NULL;
+    }
+    if (match(p, ';')) {
+        init = cond;
+        cond = parse_expr(p);
+        if (!cond) {
+            syntax_error("Expected condition after `if` init statement");
+            return NULL;
+        }
+    }
+    Stmt* then_branch = parse_stmt(p);
+    Stmt* else_branch = NULL;
+    if (match_keyword(p, KW_ELSE)) {
+        else_branch = parse_stmt(p);
+        if (!else_branch) {
+            syntax_error("Expected statement after `else`");
+            return NULL;
+        }
+    }
+    Stmt* stmt = stmt_if_init(&p->ast_arena, init, cond, then_branch, else_branch);
+    return stmt;
+}
+
+static Stmt* parse_for_stmt(Parser* p)
+{
+    // @TODO: Differentiate between traditional for-loops and range-based for-loops.
+    if (!match_keyword(p, KW_FOR)) { return NULL; }
+    Stmt* init = parse_expr_stmt(p);
+    if (init && !match(p, ';')) {
+        syntax_error("Expected ';' after `for` init statement");
+        return NULL;
+    }
+    else {
+        match(p, ';'); // @IMPROVE: Should we not warn against emtpy `for ;;` statements?
+    }
+
+    Expr* cond = parse_expr(p);
+    Stmt* post = NULL;
+    if (match(p, ';')) {
+        post = parse_expr_stmt(p);
+    }
+
+    Stmt* body = parse_stmt(p);
+    if (!body) {
+        syntax_error("Expected statement after `for`");
+        return NULL;
+    }
+
+    return stmt_for(&p->ast_arena, init, cond, post, body, (String){0});
+}
+
+static Stmt* parse_switch_stmt(Parser* p) {
+    if (!match_keyword(p, KW_SWITCH)) { return NULL; }
+    Expr* expr = parse_expr(p);
+    if (!expr) {
+        syntax_error("Expected expression after `switch`");
+        return NULL;
+    }
+    consume(p, '{', "Expected '{' after `switch` expression");
+
+    Switch_Case* cases = NULL;
+    Switch_Case default_case = {0};
+
+    for (;;) {
+        if (match(p, '}')) { break; }
+        consume_keyword(p, KW_CASE, "Expected `case` or `}` in `switch` statement");
+
+        if (match(p, '}')) { break; }
+
+        if (match(p, ':')) {
+            // This is a `default` case.
+            if (default_case.body != NULL) {
+                syntax_error("Only a single `default` case is allowed in a `switch` statement");
+                return NULL;
+            }
+            Stmt* case_body = parse_stmt(p);
+            if (!case_body) {
+                syntax_error("Expected statement after `case`");
+                return NULL;
+            }
+        }
+        else {
+            Expr* cond = parse_expr(p);
+            if (!cond) {
+                syntax_error("Expected expression after `case`");
+                return NULL;
+            }
+            Stmt* case_body = parse_stmt(p);
+            if (!case_body) {
+                syntax_error("Expected statement after `case`");
+                return NULL;
+            }
+            darray_add(cases, (Switch_Case){
+                .condition = cond,
+                .body      = case_body,
+            });
+        }
+    }
+
+    Stmt* stmt = stmt_switch(&p->ast_arena, cases, darray_len(cases), default_case.body);
+    darray_free(cases);
+    return stmt;
+}
+
+static Stmt* parse_control_stmt(Parser* p, Keyword kw, Stmt* (*create_stmt)(Arena*, String))
+{
+    if (!match_keyword(p, KW_BREAK)) { return NULL; }
+    String label = (String){0};
+    if (p->current.kind == TOK_IDENTIFIER) {
+        advance(p);
+        label = dup_string(&p->string_arena, p->current.svalue);
+    }
+    Stmt* stmt = create_stmt(&p->ast_arena, label);
+    end_stmt(p);
+    return stmt;
+}
+
+static Stmt* parse_break_stmt(Parser* p)
+{
+    return parse_control_stmt(p, KW_BREAK, stmt_break);
+}
+
+static Stmt* parse_continue_stmt(Parser* p)
+{
+    return parse_control_stmt(p, KW_CONTINUE, stmt_continue);
+}
+
+//
+// Expression Parsing
+//
+
+typedef enum {
+    PREC_NONE = 0,
+    PREC_TERNARY,
+    PREC_OR,
+    PREC_AND,
+    PREC_BIT_OR,
+    PREC_BIT_XOR,
+    PREC_BIT_AND,
+    PREC_EQ,
+    PREC_SHIFT,
+    PREC_ADD,
+    PREC_MUL,
+    PREC_UNARY,
+    PREC_CALL,
+    PREC_PRIMARY,
+} Precedence;
+
+static int get_precedence(Token_Kind kind)
+{
     switch ((int)kind) {
-        case '?':       return 1;
+        case '?':       return PREC_TERNARY;
 
-        case TOK_OR:    return 2;
-        case TOK_AND:   return 3;
-        case '|':       return 4;
-        case '^':       return 5;
-        case '&':       return 6;
+        case TOK_OR:    return PREC_OR;
+        case TOK_AND:   return PREC_AND;
+        case '|':       return PREC_BIT_OR;
+        case '^':       return PREC_BIT_XOR;
+        case '&':       return PREC_BIT_AND;
 
         case TOK_EQ:
         case TOK_NEQ:
@@ -61,795 +504,236 @@ static int get_precedence(Token_Kind kind) {
         case TOK_LTEQ:
         case '>':
         case TOK_GTEQ:
-            return 7;
+            return PREC_EQ;
 
         case TOK_LSHIFT:
         case TOK_RSHIFT:
-            return 8;
+            return PREC_SHIFT;
 
-        case '+':       return  9;
-        case '-':       return  9;
+        case '+':       return PREC_ADD;
+        case '-':       return PREC_ADD;
 
-        case '*':       return 10;
-        case '/':       return 10;
-        case '%':       return 10;
+        case '*':       return PREC_MUL;
+        case '/':       return PREC_MUL;
+        case '%':       return PREC_MUL;
 
-        case '.':       return 11;
+        case '(':       return PREC_CALL;
+        case '.':       return PREC_CALL;
     }
 
-    return 0;
+    return PREC_NONE;
 }
 
-static bool is_binary_op(Parse_Context* p) {
-    return get_precedence(p->current.kind) != 0;
-}
+static Expr* parse_expr_with_precedence(Parser* p, int precedence);
+static Expr* parse_prefix_expr(Parser* p);
+static Expr* parse_primary_expr(Parser* p);
+static Expr* parse_struct_expr(Parser* p);
+static Expr* parse_union_expr(Parser* p);
 
-
-static void advance(Parse_Context* p) {
-    if (p->current.kind == TOK_EOF) { return; }
-    p->previous = p->current;
-    // @TODO: Handle token errors
-    p->current  = lexer_next_token(&p->lexer);
-}
-
-PRINTF_LIKE(2, 0)
-static void parse_errorv(Parse_Context* p, const char* fmt, va_list args) {
-    char static_buffer[2048];
-    char* buffer = static_buffer;
-    int written = vsnprintf(buffer, sizeof(static_buffer), fmt, args);
-    if (written < 0) {
-        fprintf(stderr, "Error formatting parse_errorv() message\n");
-        exit(1);
-    }
-    if ((usize)written >= sizeof(buffer)) {
-        buffer = xmalloc((usize)written + 1);
-        written = vsnprintf(buffer, (usize)written + 1, fmt, args);
-        if (written < 0) {
-            fprintf(stderr, "Error formatting parse_errorv() message\n");
-            exit(1);
-        }
+static Expr* parse_expr(Parser* p)
+{
+    Expr* expr = parse_expr_with_precedence(p, 0);
+    if (!match(p, ',')) {
+        return expr;
     }
 
-    syntax_error("%s", buffer);
-
-    if (buffer != static_buffer) {
-        free(buffer);
-    }
-}
-
-PRINTF_LIKE(3, 4)
-static void consume(Parse_Context* p, Token_Kind kind, const char *err_fmt, ...) {
-    if (p->current.kind == kind) {
-        advance(p);
-        return;
-    }
-
-    va_list args;
-    va_start(args, err_fmt);
-    parse_errorv(p, err_fmt, args);
-    va_end(args);
-}
-
-PRINTF_LIKE(3, 4)
-static void consume_keyword(Parse_Context* p, Keyword kw, const char *err_fmt, ...) {
-    if (p->current.kind == TOK_KEYWORD && p->current.keyword == kw) {
-        advance(p);
-        return;
-    }
-
-    va_list args;
-    va_start(args, err_fmt);
-    parse_errorv(p, err_fmt, args);
-    va_end(args);
-}
-
-PRINTF_LIKE(4, 5)
-static void consume_keywords(Parse_Context* p, Keyword* kw, int kw_count, const char *err_fmt, ...) {
-    if (p->current.kind == TOK_KEYWORD) {
-        for (int i = 0; i < kw_count; i++) {
-            if (p->current.keyword == kw[i]) {
-                advance(p);
-                return;
-            }
-        }
-    }
-
-    va_list args;
-    va_start(args, err_fmt);
-    parse_errorv(p, err_fmt, args);
-    va_end(args);
-}
-
-//
-// Declaration
-//
-
-Decl* parse_decl(Parse_Context* p) {
-    if (is_token(p, TOK_KEYWORD)) {
-        switch (p->current.keyword) {
-            case KW_PROC:
-                return parse_proc_decl(p);
-            case KW_STRUCT:
-            case KW_UNION:
-                return parse_struct_or_union_decl(p);
-            case KW_ENUM:
-                return parse_enum_decl(p);
-            default:
-                return NULL;
-        }
-    }
-    return NULL;
-}
-
-
-static Decl* parse_proc_decl(Parse_Context* p) {
-    consume_keyword(p, KW_PROC, "Expected 'proc' keyword");
-
-    // @TODO: Parse function specifiers?
-
-    consume(p, '(', "Expected '(' after 'proc'");
-    Aggregate_Item* args = NULL;
+    // It's a list expression: `e1, e2, e3, ...`
+    Expr** exprs = NULL;
+    darray_add(exprs, expr);
     for (;;) {
-        if (is_token(p, ')')) { break; }
-        if (match_token(p, TOK_EOF)) {
-            syntax_error("Unexpected end of file in function arguments");
-            break;
-        }
-
-        Aggregate_Item item;
-        if (parse_function_arg(p, &item)) {
-            darray_add(args, item);
-        } else {
-            syntax_error("Expected function argument");
-            break;
-        }
-        if (match_token(p, ',')) { continue; }
-
-        break;
+        expr = parse_expr_with_precedence(p, 0);
+        darray_add(exprs, expr);
+        if (!match(p, ',')) { break; }
     }
-    consume(p, ')', "Expected ')' after function arguments");
-    Typespec* return_type = NULL;
-    if (!is_token(p, '{')) {
-        return_type = parse_typespec(p);
-        if (!return_type) {
-            syntax_error("Expected return type or function body");
-            return NULL;
-        }
-    }
-    Stmt* body = parse_block_stmt(p);
-    return decl_proc(args, darray_len(args), return_type, body);
+
+    expr = expr_list(&p->ast_arena, exprs, darray_len(exprs));
+    return expr;
 }
 
-static Decl* parse_struct_or_union_decl(Parse_Context* p) {
-    consume_keywords(p, (Keyword[]){KW_STRUCT, KW_UNION}, 2, "Expected 'struct' or 'union' keyword");
-    bool is_struct = p->previous.keyword == KW_STRUCT;
-
-    consume(p, '{', "Expected '{' after %s", is_struct ? "struct" : "union");
-    Aggregate_Item* items = NULL;
-    Proc_Decl* methods = NULL;
-
-    for (;;) {
-        if (is_token(p, '}')) { break; }
-        if (is_token(p, TOK_EOF)) {
-            syntax_error("Unexpected end of file in %s declaration", is_struct ? "struct" : "union");
-            break;
-        }
-
-        Aggregate_Item item;
-        if (try_parse_aggregate_item(p, &item)) {
-            darray_add(items, item);
-        } else {
-            syntax_error("Expected struct/union member declaration");
-            break;
-        }
-        consume(p, ';', "Expected ';' after struct/union member declaration");
-
-        // @TODO: Parse member functions
-    }
-
-    consume(p, '}', "Expected '}' after %s body", is_struct ? "struct" : "union");
-
-    return is_struct
-        ? decl_struct(items, darray_len(items), methods, darray_len(methods))
-        : decl_union(items, darray_len(items), methods, darray_len(methods));
-
-}
-
-static Decl* parse_enum_decl(Parse_Context* p) {
-    consume_keyword(p, KW_ENUM, "Expected 'enum' keyword");
-    consume(p, '{', "Expected '{' after 'enum'");
-
-    Enum_Item* items = NULL;
-    Proc_Decl* methods = NULL;
-
-    for (;;) {
-        if (p->current.kind == '}') { break; }
-        if (p->current.kind == TOK_EOF) {
-            syntax_error("Unexpected end of file in enum declaration");
-            break;
-        }
-
-        consume(p, TOK_IDENTIFIER, "Expected enum item name");
-        Token name = p->previous;
-
-        Expr* value = NULL;
-        if (match_token(p, '=')) {
-            value = parse_expr(p);
-            if (!value) {
-                syntax_error("Expected enum item value expression");
-                return NULL;
-            }
-        }
-
-        Enum_Item item = {
-            .name  = str_from_cstr(name.name),
-            .value = value,
-        };
-        darray_add(items, item);
-
-        if (!match_token(p, ',')) { break; }
-    }
-
-    consume(p, '}', "Expected '}' after enum body");
-    return decl_enum(items, darray_len(items), methods, darray_len(methods));
-}
-
-static bool parse_function_arg(Parse_Context* p, Aggregate_Item* out_item) {
-    // Maybe it will need to be different, but for now just use the same
-    // as aggregate item parsing.
-    return try_parse_aggregate_item(p, out_item);
-}
-
-static bool try_parse_aggregate_item(Parse_Context* p, Aggregate_Item* out_item) {
-    String* names = NULL;
-
-    for (;;) {
-        if (p->current.kind != TOK_IDENTIFIER) { break; }
-
-        darray_add(names, str_from_cstr(p->current.name));
-        advance(p);
-
-        if (!match_token(p, ',')) { break; }
-    }
-
-    if (names == NULL) {
-        return false;
-    }
-
-    Typespec* type = NULL;
-    Expr* default_value = NULL;
-
-    if (match_token(p, TOK_VAR_ASSIGN)) {
-        default_value = parse_expr(p);
-        if (!default_value) {
-            syntax_error("Expected expression after ':='");
-            return false;
-        }
-    }
-    else if (match_token(p, ':')) {
-        type = parse_typespec(p);
-        if (!type) {
-            syntax_error("Expected type in aggregate item");
-            return false;
-        }
-
-        if (match_token(p, '=')) {
-            default_value = parse_expr(p);
-            if (!default_value) {
-                syntax_error("Expected expression after '='");
-                return false;
-            }
-        }
-    } else {
-        syntax_error("Expected type or default value in aggregate item");
-        return false;
-    }
-
-    out_item->names         = names;
-    out_item->names_count   = (int)darray_len(names);
-    out_item->type          = type;
-    out_item->default_value = default_value;
-    return true;
-}
-
-//
-// Typespec
-//
-
-static Typespec* parse_typespec(Parse_Context* p) {
-    advance(p);
-    switch (p->previous.kind) {
-        case '[': {
-            Expr* size_expr = is_token(p, ']') ? NULL : parse_expr(p);
-            consume(p, ']', "Expected ']'");
-            bool is_const = match_keyword(p, KW_CONST);
-            Typespec* element_type = parse_typespec(p);
-            if (!element_type) {
-                syntax_error("Expected element type in array typespec");
-                return NULL;
-            }
-            return typespec_array(element_type, size_expr, is_const);
-        }
-
-        case '*': {
-            bool is_const = match_keyword(p, KW_CONST);
-            Typespec* base_type = parse_typespec(p);
-            if (!base_type) {
-                syntax_error("Expected base type in pointer typespec");
-                return NULL;
-            }
-            return typespec_pointer(base_type, is_const);
-        } break;
-
-        case TOK_IDENTIFIER: {
-            return typespec_name(p->previous.name);
-        } break;
-
-        default:
-            syntax_error("Unexpected token in typespec: %s", token_kind_to_string(p->previous.kind));
-            break;
-    }
-
-    return NULL;
-}
-
-//
-// Expression
-//
-
-static Expr* parse_unary_expr(Parse_Context* p, bool is_lhs) {
-    advance(p);
-    switch (p->previous.kind) {
-        case '+':
-        case '-':
-        case '!':
-        case '~':
-        case '*':
-        case TOK_INCREMENT:
-        case TOK_DECREMENT:
-            return expr_unary(p->previous.kind, parse_expr_precedence(p, is_lhs, UNARY_PRECEDENCE));
-
-        case '(': {
-            Expr* inner = parse_expr_precedence(p, is_lhs, 0);
-            consume(p, ')', "Expected ')' after expression");
-            return inner;
-        }
-
-        case TOK_INT_LITERAL:
-            return expr_int(p->previous.ivalue);
-        case TOK_FLT_LITERAL:
-            return expr_flt(p->previous.fvalue);
-        case TOK_CHAR_LITERAL:
-            NOT_IMPLEMENTED();  // @TODO: Needs to be marked as a char so that we can properly convert in the
-                                // C back-end.
-            return expr_int((u64)p->previous.cvalue);
-        case TOK_STRING_LITERAL:
-            return expr_str(p->previous.svalue);
-        case TOK_IDENTIFIER:
-            return expr_name(p->previous.name);
-
-        case TOK_KEYWORD: {
-            switch (p->previous.keyword) {
-                case KW_SIZEOF:
-                case KW_ALIGNOF: {
-                    bool is_sizeof = p->previous.keyword == KW_SIZEOF;
-                    consume(p, '(', "Expected '(' after 'sizeof'");
-                    if (match_token(p, ':')) {
-                        Typespec* type = parse_typespec(p);
-                        if (!type) {
-                            syntax_error("Expected type in 'sizeof' expression");
-                            return NULL;
-                        }
-                        consume(p, ')', "Expected ')' after 'sizeof' type");
-                        return is_sizeof
-                            ? expr_sizeof_type(type)
-                            : expr_alignof_type(type);
-                    } else {
-                        Expr* expr = parse_expr(p);
-                        if (!expr) {
-                            syntax_error("Expected expression in 'sizeof' expression");
-                            return NULL;
-                        }
-                        consume(p, ')', "Expected ')' after 'sizeof' expression");
-                        return is_sizeof
-                            ? expr_sizeof_expr(expr)
-                            : expr_alignof_expr(expr);
-                    }
-                };
-
-                case KW_TRUE:
-                    return expr_bool(true);
-                case KW_FALSE:
-                    return expr_bool(false);
-                case KW_NULL:
-                    return expr_null();
-
-                case KW_CAST: {
-                    consume(p, '(', "Expected '(' after 'cast'");
-                    Typespec* target_type = parse_typespec(p);
-                    if (!target_type) {
-                        syntax_error("Expected target type in 'cast' expression");
-                        return NULL;
-                    }
-                    consume(p, ')', "Expected ')' after 'cast' target type");
-                    Expr* value = parse_expr_precedence(p, is_lhs, UNARY_PRECEDENCE);
-                    if (!value) {
-                        syntax_error("Expected value expression in 'cast' expression");
-                        return NULL;
-                    }
-                    return expr_cast(target_type, value);
-                } break;
-
-                default:
-                    syntax_error("Unexpected keyword in expression: %s", keyword_to_string(p->previous.keyword));
-                    return NULL;
-            }
-        } break;
-
-        default:
-            break;
-    }
-
-    return NULL;
-}
-
-static Expr* parse_expr_precedence(Parse_Context* p, bool is_lhs, int min_prec) {
-    Expr* left = parse_unary_expr(p, is_lhs);
+static Expr* parse_expr_with_precedence(Parser* p, int precedence)
+{
+    Expr* left = parse_prefix_expr(p);
     if (!left) { return NULL; }
 
     for (;;) {
-        if (is_token(p, ',') || is_token(p, ';')) { break; }
-
-        if (match_token(p, '(')) {
-            Expr** args = NULL;
-            for (;;) {
-                if (is_token(p, ')')) { break; }
-                Expr* arg = parse_expr(p);
-                if (!arg) {
-                    syntax_error("Expected function argument expression");
-                    return NULL;
-                }
-                darray_add(args, arg);
-                if (!match_token(p, ',')) { break; }
-            }
-            consume(p, ')', "Expected ')' after function call arguments");
-            left = expr_call(left->name, args, darray_len(args));
-            continue;
+        if (p->current.kind == ':' || p->current.kind == '=' ||
+            p->current.kind == TOK_VAR_ASSIGN || p->current.kind == TOK_CONST_ASSIGN)
+        {
+            break;
         }
 
-        if (!is_binary_op(p)) { break; }
-
-        int prec = get_precedence(p->current.kind);
-        ASSERT(prec != 0, "Expected non-zero precedence for binary operator");
-
-        if (prec < min_prec) { break; }
-
-        Token_Kind op = p->current.kind;
+        int curr_precedence = get_precedence(p->current.kind);
+        // If we encounter any non-binary operator, we get a NONE precedence
+        // and we can break out of the loop.
+        if (curr_precedence == PREC_NONE || curr_precedence <= precedence) {
+            break;
+        }
         advance(p);
-
-        Expr* right = parse_expr_precedence(p, is_lhs, prec + 1);
+        Expr* right = parse_expr_with_precedence(p, curr_precedence);
         if (!right) {
-            syntax_error("Expected right-hand side expression");
+            syntax_error("Expected expression after binary operator");
             return NULL;
         }
-
-        left = expr_binary(op, left, right);
+        left = expr_binary(&p->ast_arena, p->current.kind, left, right);
     }
 
     return left;
 }
 
-Expr* parse_expr(Parse_Context* p) {
-    Decl* decl = parse_decl(p);
-    if (decl) {
-        return expr_decl(decl);
-    }
-
-    return parse_expr_precedence(p, false, 0);
-}
-
-static Expr* parse_list_expr(Parse_Context* p) {
-    Expr** elements = NULL;
-    for (;;) {
-        Expr* elem = parse_expr(p);
-        if (!elem)
-            break;
-        darray_add(elements, elem);
-        if (!match_token(p, ',')) {
-            break;
-        }
-    }
-    if (darray_len(elements) == 0) {
-         return NULL;
-    }
-    if (darray_len(elements) == 1) {
-        Expr* single = elements[0];
-        darray_free(elements);
-        return single;
-    }
-
-    return expr_list(elements, darray_len(elements));
-}
-
-//
-// Statement
-//
-
-static Stmt* parse_expr_or_assignment_stmt(Parse_Context* p) {
-    Expr* lhs_list = parse_list_expr(p);
-    if (!lhs_list) {
-        return NULL;
-    }
-
+static Expr* parse_prefix_expr(Parser* p)
+{
     switch (p->current.kind) {
-        case '=':
-        case TOK_ADD_ASSIGN:
-        case TOK_SUB_ASSIGN:
-        case TOK_MUL_ASSIGN:
-        case TOK_DIV_ASSIGN:
-        case TOK_MOD_ASSIGN:
-        case TOK_AND_ASSIGN:
-        case TOK_OR_ASSIGN:
-        case TOK_XOR_ASSIGN:
-        case TOK_LSHIFT_ASSIGN:
-        case TOK_RSHIFT_ASSIGN:
-        case TOK_BIT_AND_ASSIGN:
-        case TOK_BIT_OR_ASSIGN: {
-            Token_Kind assign_op = p->current.kind;
+        default:
+            syntax_error("Unexpected token type `%s` in expression", token_kind_to_string(p->current.kind));
+            return NULL;
+
+        case TOK_INT_LITERAL:
+        case TOK_FLT_LITERAL:
+        case TOK_CHAR_LITERAL:
+        case TOK_STRING_LITERAL:
+        case TOK_KEYWORD:
+        case TOK_IDENTIFIER: {
+            return parse_primary_expr(p);
+        } break;
+
+        case '(': {
             advance(p);
-            Expr* rhs_list = parse_list_expr(p);
-            if (!rhs_list) {
-                syntax_error("Expected right-hand side expression in assignment");
+            Expr* expr = parse_expr(p);
+            if (!expr) {
+                syntax_error("Expected expression after '('");
                 return NULL;
             }
-            consume(p, ';', "Expected ';' after assignment statement");
-            return stmt_assign(assign_op, lhs_list, rhs_list);
-        }
-
-        case TOK_VAR_ASSIGN:
-        case TOK_CONST_ASSIGN: {
-            bool is_const = p->current.kind == TOK_CONST_ASSIGN;
-            advance(p);
-            Expr* rhs_list = parse_list_expr(p);
-            if (!rhs_list) {
-                syntax_error("Expected right-hand side expression in declaration statement");
+            if (!consume(p, ')', "Expected ')' after expression")) {
                 return NULL;
             }
-            bool can_skip_semicolon =
-                (rhs_list->kind == EXPR_DECL) ||
-                (rhs_list->kind == EXPR_LIST && rhs_list->list.exprs[rhs_list->list.expr_count - 1]->kind == EXPR_DECL);
+            return expr;
+        } break;
 
-            if (!can_skip_semicolon)
-                consume(p, ';', "Expected ';' after declaration statement");
-
-            if (is_const) {
-                return stmt_decl_const(lhs_list, NULL, rhs_list);
-            } else {
-                return stmt_decl_var(lhs_list, NULL, rhs_list);
-            }
-        }
-
-        case ':': {
+        case '+':
+        case '-':
+        case '!':
+        case '~': {
             advance(p);
-            Typespec* type = parse_typespec(p);
-            if (!type) {
-                syntax_error("Expected type in declaration statement");
+            Expr* right = parse_expr_with_precedence(p, PREC_UNARY);
+            if (!right) {
+                syntax_error("Expected expression after unary operator");
                 return NULL;
             }
+            return expr_unary(&p->ast_arena, p->current.kind, right);
+        } break;
+    }
+}
 
-            if (match_token(p, ';')) {
-                return stmt_decl_var(lhs_list, type, NULL);
-            }
-
+static Expr* parse_primary_expr(Parser* p)
+{
+    Expr* expr = NULL;
+    switch (p->current.kind) {
+        case TOK_INT_LITERAL: {
+            expr = expr_int(&p->ast_arena, p->current.ivalue);
             advance(p);
-            bool is_const = false;
-            switch (p->previous.kind) {
-                case ':': is_const = true;  break;
-                case '=': is_const = false; break;
+        } break;
+        case TOK_FLT_LITERAL: {
+            expr = expr_float(&p->ast_arena, p->current.fvalue);
+            advance(p);
+        } break;
+        case TOK_CHAR_LITERAL: {
+            expr = expr_int(&p->ast_arena, p->current.cvalue); // @TODO: Flag chars
+            advance(p);
+        } break;
+        case TOK_STRING_LITERAL: {
+            expr = expr_str(&p->ast_arena, dup_string(&p->string_arena, p->current.svalue));
+            advance(p);
+        } break;
+        case TOK_IDENTIFIER: {
+            expr = expr_name(&p->ast_arena, dup_string(&p->string_arena, p->current.svalue));
+            advance(p);
+        } break;
+        case TOK_KEYWORD: {
+            switch (p->current.keyword) {
+                case KW_TRUE:       expr = expr_bool(&p->ast_arena, true);  advance(p); break;
+                case KW_FALSE:      expr = expr_bool(&p->ast_arena, false); advance(p); break;
+                case KW_NULL:       expr = expr_null(&p->ast_arena);        advance(p); break;
+                case KW_STRUCT:     expr = parse_struct_expr(p);    break;
+                case KW_UNION:      expr = parse_union_expr(p);     break;
+
                 default:
-                    syntax_error("Expected ':', ':=', or '=' in declaration statement");
+                    syntax_error("Unexpected keyword `%s` in expression", keyword_to_string(p->current.keyword));
                     return NULL;
-            }
-
-            Expr* rhs_list = parse_list_expr(p);
-            if (!rhs_list) {
-                syntax_error("Expected right-hand side expression in declaration statement");
-                return NULL;
-            }
-
-            bool can_skip_semicolon =
-                (rhs_list->kind == EXPR_DECL) ||
-                (rhs_list->kind == EXPR_LIST && rhs_list->list.exprs[rhs_list->list.expr_count - 1]->kind == EXPR_DECL);
-            if (!can_skip_semicolon)
-                consume(p, ';', "Expected ';' after declaration statement");
-
-            if (is_const) {
-                return stmt_decl_const(lhs_list, type, rhs_list);
-            } else {
-                return stmt_decl_var(lhs_list, type, rhs_list);
             }
         } break;
 
         default:
-            return stmt_expr(lhs_list);
-    }
-    UNREACHABLE("Unhandled case in parse_expr_or_assignment_stmt");
-}
-
-Stmt* parse_stmt(Parse_Context* p) {
-    switch (p->current.kind) {
-        case '{':
-            return parse_block_stmt(p);
-
-        case TOK_KEYWORD: {
-            advance(p);
-            switch (p->previous.keyword) {
-                case KW_BREAK: {
-                } break;
-
-                case KW_CONTINUE: {
-                } break;
-
-                case KW_IF: {
-                    Expr* condition = parse_expr(p);
-                    if (!condition) {
-                        syntax_error("Expected condition expression in 'if' statement");
-                        return NULL;
-                    }
-                    Stmt* then_branch = parse_stmt(p);
-                    if (!then_branch) {
-                        syntax_error("Expected 'then' branch statement in 'if' statement");
-                        return NULL;
-                    }
-                    Stmt* else_branch = NULL;
-                    if (match_keyword(p, KW_ELSE)) {
-                        else_branch = parse_stmt(p);
-                        if (!else_branch) {
-                            syntax_error("Expected 'else' branch statement in 'if' statement");
-                            return NULL;
-                        }
-                    }
-                    return stmt_if(condition, then_branch, else_branch);
-                } break;
-
-                case KW_RETURN: {
-                    Expr* value = NULL;
-                    if (!is_token(p, ';') && !is_token(p, '}')) {
-                        value = parse_expr(p);
-                        if (!value) {
-                            syntax_error("Expected return value expression");
-                            return NULL;
-                        }
-                    }
-                    return stmt_return(value);
-                } break;
-
-                case KW_WHILE: {
-                    Expr* condition = parse_expr(p);
-                    if (!condition) {
-                        syntax_error("Expected condition expression in 'while' statement");
-                        return NULL;
-                    }
-                    Stmt* body = parse_stmt(p);
-                    if (!body) {
-                        syntax_error("Expected body statement in 'while' statement");
-                        return NULL;
-                    }
-                    return stmt_while(condition, body);
-                } break;
-
-                case KW_DO: {
-                    Stmt* body = parse_stmt(p);
-                    if (!body) {
-                        syntax_error("Expected body statement in 'do' statement");
-                        return NULL;
-                    }
-                    consume_keyword(p, KW_WHILE, "Expected 'while' after 'do' body");
-                    Expr* condition = parse_expr(p);
-                    if (!condition) {
-                        syntax_error("Expected condition expression in 'do...while' statement");
-                        return NULL;
-                    }
-                    consume(p, ';', "Expected ';' after 'do...while' condition");
-                    return stmt_do_while(body, condition);
-                } break;
-
-                case KW_FOR: {
-                    NOT_IMPLEMENTED();
-                } break;
-
-                case KW_SWITCH: {
-                    NOT_IMPLEMENTED();
-                } break;
-
-                default:
-                    syntax_error("Unexpected keyword in statement: %s", keyword_to_string(p->previous.keyword));
-                    return NULL;
-            }
-        } break;
-
-        default: {
-            return parse_expr_or_assignment_stmt(p);
-        } break;
+            syntax_error("Unexpected token in expression");
+            return NULL;
     }
 
-    return NULL;
+    return expr;
 }
 
-static Stmt* parse_block_stmt(Parse_Context* p) {
-    if (!match_token(p, '{')) {
-        syntax_error("Expected '{' to start block statement");
+static Expr* parse_aggreagate_expr(Parser* p, Keyword kw, Expr* (*make_expr)(Arena*, Stmt**, int))
+{
+    if (!match_keyword(p, kw)) {
+        ASSERT_ALWAYS("parse_struct_expr called but no 'struct' keyword found");
         return NULL;
     }
 
-    Stmt** stmts = NULL;
+    consume(p, '{', "Expected '{' after 'struct'");
+
+    Stmt** members = NULL;
     for (;;) {
-        if (is_token(p, '}')) { break; }
-        if (is_token(p, TOK_EOF)) {
-            syntax_error("Unexpected end of file in block statement");
-            break;
+        Stmt* member = parse_expr_stmt(p);
+        if (!member) {
+            syntax_error("Expected member declaration in struct expression");
+            darray_free(members);
+            return NULL;
         }
-        Stmt* stmt = parse_stmt(p);
-        if (stmt) {
-            darray_add(stmts, stmt);
-        }
+
+        darray_add(members, member);
+        if (match(p, '}')) { break; }
     }
-    consume(p, '}', "Expected '}' to end block statement");
-    return stmt_block(stmts, darray_len(stmts));
+
+    Expr* expr = make_expr(&p->ast_arena, members, darray_len(members));
+    darray_free(members);
+    return expr;
 }
 
-//
-// Helpers
-//
-
-static bool match_token(Parse_Context* p, Token_Kind kind) {
-    if (!is_token(p, kind)) { return false; }
-    advance(p);
-    return true;
+static Expr* parse_struct_expr(Parser* p)
+{
+    return parse_aggreagate_expr(p, KW_STRUCT, expr_struct);
 }
 
-static bool match_keyword(Parse_Context* p, Keyword kw) {
-    if (!is_keyword(p, kw)) { return false; }
-    advance(p);
-    return true;
-}
-
-static bool is_token(Parse_Context* p, Token_Kind kind) {
-    return p->current.kind == kind;
-}
-
-static bool is_keyword(Parse_Context* p, Keyword kw) {
-    return p->current.kind == TOK_KEYWORD && p->current.keyword == kw;
+static Expr* parse_union_expr(Parser* p)
+{
+    return parse_aggreagate_expr(p, KW_UNION, expr_union);
 }
 
 //
 // Test
 //
 
-static void parse_and_print_decl(const char* input) {
-    Parse_Context pctx = parse_init(input);
-    parse_begin(&pctx);
-    Decl* decl = parse_decl(&pctx);
-    if (decl) {
-        print_decl(decl, 0);
-        printf("\n");
-    } else {
-        ASSERT_ALWAYS("Failed to parse declaration");
-    }
-    parse_end(&pctx);
-    parse_shutdown(&pctx);
+static void parse_and_print_decl(String input)
+{
+    printf("Parsing declaration: %.*s\n", (int)input.len, input.data);
+    Parser parser = parser_init(input, NULL);
+    Stmt* stmt = parser_next_stmt(&parser);
+    ASSERT(stmt);
+    stmt_print(stmt, 0);
+    printf("\n");
+
+    parser_shutdown(&parser);
 }
 
-static void parse_complex_code(void) {
-    const char* code =
+static void parse_complex_code(void)
+{
+    String code = str_from_lit(
         "MyType :: struct {\n"
         "  x, y: f32;\n"
         "  label: [16]const u8;\n"
         "  is_active :bool= true;\n"
         "  is_visible := false;\n"
-        "};\n"
+        "}\n"
         "\n"
-        "make_point :: proc(x: f32, y: f32, label: [16]const u8) MyType {\n"
+        "make_point :: fn(x: f32, y: f32, label: [16]const u8) MyType {\n"
         "  res :MyType;\n"
         "  res.x = x;\n"
         "  res.y = y;\n"
@@ -857,46 +741,44 @@ static void parse_complex_code(void) {
         "  return res;\n"
         "}\n"
         "\n"
-        "main :: proc() s32 {\n"
+        "main :: fn() s32 {\n"
         "  p := make_point(10.0, 20.0, \"Origin\");\n"
         "  if p.is_active {\n"
         "    trace(\"Point %s is at ({}, {})\", p.label, p.x, p.y);\n"
         "  } else {\n"
         "    trace(\"Point {} is inactive\", p.label);\n"
         "  }\n"
-        "  print(\"Size of MyType: {} bytes\", sizeof(:MyType));\n"
+        "  print(\"Size of MyType: {} bytes\", sizeof(MyType));\n"
         "  return 0;\n"
-        "}\n";
+        "}\n");
 
-    Parse_Context pctx = parse_init(code);
-    parse_begin(&pctx);
+    Parser parser = parser_init(code, NULL);
 
     Stmt** stmts = NULL;
-    while (pctx.current.kind != TOK_EOF) {
-        Stmt* stmt = parse_stmt(&pctx);
+    while (!parser_is_at_end(&parser)) {
+        Stmt* stmt = parser_next_stmt(&parser);
         if (stmt) {
             darray_add(stmts, stmt);
         }
-    }
-
-    for (Stmt** it = stmts; it != darray_end(stmts); it++) {
-        print_stmt(*it, 0);
+        stmt_print(stmt, 0);
         printf("\n");
     }
 
     darray_free(stmts);
-    parse_end(&pctx);
-    parse_shutdown(&pctx);
+    parser_shutdown(&parser);
 }
 
-TEST(parse) {
+TEST(parse)
+{
+
+    parse_and_print_decl(str_from_lit("struct { x, y: f32; }"));
+    parse_and_print_decl(str_from_lit("struct {\n  x, y: f32;\n  s := \"hello\";\n}"));
+    parse_and_print_decl(str_from_lit("union { i: s32; f: f32; }"));
+    parse_and_print_decl(str_from_lit("enum { Red, Green = 5, Blue, }"));
+    parse_and_print_decl(
+        str_from_lit("fn(n: s32) s32 { trace(\"fact\"); if n <= 1 { return 1; } return n * fact(n - 1); }"));
+
     break_on_syntax_error = true;
     parse_complex_code();
-
-    parse_and_print_decl("struct { x, y: f32; }");
-    parse_and_print_decl("struct {\n  x, y: f32;\n  s := \"hello\";\n}");
-    parse_and_print_decl("union { i: s32; f: f32; }");
-    parse_and_print_decl("enum { Red, Green = 5, Blue, }");
-    parse_and_print_decl("proc(n: s32) s32 { trace(\"fact\"); if n <= 1 { return 1; } return n * fact(n - 1); }");
 }
 

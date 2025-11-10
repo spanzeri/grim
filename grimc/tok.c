@@ -1,6 +1,7 @@
 #include "tok.h"
 
 const char* token_names[TOK_COUNT] = {
+    [TOK_INVALID]         = "<INVALID>",
     [TOK_EOF]             = "EOF",
     [TOK_KEYWORD]         = "KEYWORD",
 
@@ -73,14 +74,13 @@ const char* token_kind_to_string(Token_Kind kind) {
 const char* keyword_to_string(Keyword kw) {
     switch (kw) {
         case KW_NONE:       ASSERT_ALWAYS("Invalid keyword"); return "NONE";
-        case KW_PROC:       return "PROC";
+        case KW_FN:         return "FN";
         case KW_RETURN:     return "RETURN";
         case KW_IF:         return "IF";
         case KW_ELSE:       return "ELSE";
-        case KW_WHILE:      return "WHILE";
         case KW_FOR:        return "FOR";
-        case KW_DO:         return "DO";
         case KW_SWITCH:     return "SWITCH";
+        case KW_CASE:       return "CASE";
         case KW_BREAK:      return "BREAK";
         case KW_CONTINUE:   return "CONTINUE";
         case KW_CONST:      return "CONST";
@@ -112,7 +112,7 @@ void token_print(Token tok) {
             printf(", cvalue='%c' (%u)", (char)tok.cvalue, tok.cvalue);
             break;
         case TOK_STRING_LITERAL:
-            printf(", svalue=\"%s\"", tok.svalue);
+            printf(", svalue=\"%*.s\"", STR_FMT(tok.svalue));
             break;
         case TOK_IDENTIFIER:
             printf(", text='%.*s'", (int)(tok.end - tok.start), tok.start);

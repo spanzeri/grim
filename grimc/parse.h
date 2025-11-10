@@ -5,23 +5,23 @@
 #include "lex.h"
 #include "ast.h"
 
-typedef struct Parse_Context {
-    Lexer_Context   lexer;
-    Token           current;
-    Token           previous;
-    Arena           ast_arena;
-} Parse_Context;
+typedef struct Parser {
+    Token*      tokens;
+    int         tok_index;
+    Token       current;
+    Token       previous;
+    Arena       ast_arena;
+    Arena       string_arena;
+    const char* filepath;
+} Parser;
 
-Parse_Context   parse_init(const char* source);
-void            parse_shutdown(Parse_Context* p);
+Parser  parser_init(String source, const char* filepath);
+void    parser_shutdown(Parser* p);
 
-void            parse_begin(Parse_Context* p);
-void            parse_end(Parse_Context* p);
-
-Stmt*           parse_stmt(Parse_Context* p);
-Decl*           parse_decl(Parse_Context* p);
-Expr*           parse_expr(Parse_Context* p);
+bool    parser_is_at_end(Parser* p);
+Stmt*   parser_next_stmt(Parser* p);
 
 DECL_TEST(parse);
 
 #endif // GRIMC_PARSE_H
+

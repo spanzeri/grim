@@ -4,194 +4,126 @@
 #include "common.h"
 #include "lex.h"
 
-void    ast_set_arena(Arena* arena);
-
-typedef struct Expr Expr;
-typedef struct Decl Decl;
 typedef struct Stmt Stmt;
-typedef struct Typespec Typespec;
+typedef struct Expr Expr;
 
 typedef enum Stmt_Kind {
     STMT_NONE = 0,
-    STMT_ASSIGN,
+    STMT_ASSIGNMENT,
     STMT_DECL_VAR,
     STMT_DECL_CONST,
     STMT_EXPR,
     STMT_RETURN,
-    STMT_BREAK,
-    STMT_CONTINUE,
-    STMT_BLOCK,
+    STMT_CONTROL_BREAK,
+    STMT_CONTROL_CONTINUE,
     STMT_IF,
-    STMT_FOR,
-    STMT_WHILE,
-    STMT_DO,
     STMT_SWITCH,
+    STMT_BLOCK,
+    STMT_FOR,
+    STMT_RANGE_FOR,
 } Stmt_Kind;
 
-typedef struct Case_Branch {
-    // @IMPROVE: Support for ranges.
-    // @IMPROVE: Support for more complex case values (expressions)?
-    Expr**  values;
-    int     value_count;
-    Stmt*   body;
-} Case_Branch;
-
 struct Stmt {
-    Stmt_Kind kind;
-    union {
-        struct {
-            Token_Kind  op;
-            Expr*       left;
-            Expr*       right;
-        } assignment;
-
-        struct {
-            Expr*       left;
-            Typespec*   type;
-            Expr*       right;
-        } decl;
-
-        Expr* expr;
-
-        struct {
-            String label;
-        } control;
-
-        struct {
-            Stmt**  stmts;
-            int     stmt_count;
-        } block;
-
-        struct {
-            Expr*   condition;
-            Stmt*   then_branch;
-            Stmt*   else_branch;
-        } if_stmt;
-
-        struct {
-            Expr*   condition;
-            Stmt*   body;
-        } while_stmt;
-
-        struct {
-            Case_Branch**   cases;
-            int             case_count;
-            Stmt*           default_case;
-        } switch_stmt;
-    };
+    Stmt_Kind       kind;
 };
 
-Stmt* stmt_assign       (Token_Kind op, Expr* left, Expr* right);
-Stmt* stmt_decl_var     (Expr* left, Typespec* type, Expr* right);
-Stmt* stmt_decl_const   (Expr* left, Typespec* type, Expr* right);
-Stmt* stmt_expr         (Expr* expr);
-Stmt* stmt_return       (Expr* expr);
-Stmt* stmt_block        (Stmt** stmts, int stmt_count);
-Stmt* stmt_break        (const char* label);
-Stmt* stmt_continue     (const char* label);
-Stmt* stmt_if           (Expr* condition, Stmt* then_branch, Stmt* else_branch);
-Stmt* stmt_while        (Expr* condition, Stmt* body);
-Stmt* stmt_do_while     (Stmt* body, Expr* condition);
-Stmt* stmt_switch       (Case_Branch** cases, int case_count, Stmt* default_case);
+typedef struct Assignment_Stmt {
+    Stmt           base;
+    Token_Kind     op;
+    Expr*          left;
+    Expr*          right;
+} Assignment_Stmt;
 
-typedef enum Timespec_Kind {
-    TYPESPEC_NONE = 0,
-    TYPESPEC_NAME,
-    TYPESPEC_ARRAY,
-    TYPESPEC_PROC,
-    TYPESPEC_POINTER,
-} Typespec_Kind;
+typedef struct Decl_Stmt {
+    Stmt            base;
+    Expr*           left;
+    Expr*           typespec;
+    Expr*           right;
+} Decl_Stmt;
 
-struct Typespec {
-    Typespec_Kind kind;
-    union {
-        const char*     name;
+typedef struct Expr_Stmt {
+    Stmt            base;
+    Expr*           expr;
+} Expr_Stmt;
 
-        struct {
-            Typespec*   base;
-            Expr*       size;
-            bool        is_const;
-        } array;
+typedef struct Return_Stmt {
+    Stmt            base;
+    Expr*           expr;
+} Return_Stmt;
 
-        struct {
-            Typespec*   return_type;
-            Typespec**  params;
-            int         param_count;
-        } proc;
+typedef struct Control_Stmt {
+    Stmt            base;
+    String          label;
+} Control_Stmt;
 
-        struct {
-            Typespec*   base;
-            bool        is_const;
-        } pointer;
-    };
-};
+typedef struct If_Stmt {
+    Stmt            base;
+    Expr*           init;
+    Expr*           condition;
+    Stmt*           then_branch;
+    Stmt*           else_branch;
+} If_Stmt;
 
-Typespec* typespec_name(const char* name);
-Typespec* typespec_array(Typespec* base, Expr* size, bool is_const);
-Typespec* typespec_proc(Typespec** params, int param_count, Typespec* return_type);
-Typespec* typespec_pointer(Typespec* base, bool is_const);
+typedef struct Switch_Stmt {
+    Stmt            base;
+    struct Switch_Case* cases;
+    int             case_count;
+    Stmt*           default_case;
+} Switch_Stmt;
 
-typedef enum Decl_Kind {
-    DECL_NONE = 0,
-    DECL_ENUM,
-    DECL_STRUCT,
-    DECL_UNION,
-    DECL_PROC,
-} Decl_Kind;
+typedef struct Block_Stmt {
+    Stmt            base;
+    Stmt**          stmts;
+    int             stmt_count;
+    String          label;
+} Block_Stmt;
 
-typedef struct Enum_Item {
-    String  name;
-    Expr*   value;
-} Enum_Item;
-
-typedef struct Aggregate_Item {
-    String*     names;
-    int         names_count;
-    Typespec*   type;
-    Expr*       default_value;
-} Aggregate_Item;
-
-typedef struct Proc_Decl {
-    Aggregate_Item* args;
-    int             arg_count;
-    Typespec*       return_type;
+typedef struct For_Stmt {
+    Stmt            base;
+    Stmt*           init;
+    Expr*           condition;
+    Stmt*           post;
     Stmt*           body;
-} Proc_Decl;
+    String          label;
+} For_Stmt;
 
-struct Decl {
-    Decl_Kind   kind;
-    union {
-        struct {
-            Enum_Item*  items;
-            int         item_count;
-            Proc_Decl*  methods;
-            int         method_count;
-        } enum_decl;
+typedef struct Range_For_Stmt {
+    Stmt            base;
+    Expr*           iterator;
+    Expr*           iterable;
+    Stmt*           body;
+    String          label;
+} Range_For_Stmt;
 
-        struct {
-            Aggregate_Item* items;
-            int             item_count;
-            Proc_Decl*      methods;
-            int             method_count;
-        } aggregate_decl;
+typedef struct Switch_Case {
+    Expr*           condition;
+    Stmt*           body;
+} Switch_Case;
 
-        Proc_Decl proc_decl;
-    };
-};
+Stmt* stmt_assignment   (Arena* arena, Token_Kind op, Expr* left, Expr* right);
+Stmt* stmt_decl_var     (Arena* arena, Expr* left, Expr* typespec, Expr* right);
+Stmt* stmt_decl_const   (Arena* arena, Expr* left, Expr* typespec, Expr* right);
+Stmt* stmt_expr         (Arena* arena, Expr* expr);
+Stmt* stmt_return       (Arena* arena, Expr* expr);
+Stmt* stmt_break        (Arena* arena, String label);
+Stmt* stmt_continue     (Arena* arena, String label);
+Stmt* stmt_switch       (Arena* arena, Switch_Case* cases, int case_count, Stmt* default_case);
+Stmt* stmt_block        (Arena* arena, Stmt** stmts, int stmt_count, String label);
+Stmt* stmt_if           (Arena* arena, Expr* condition, Stmt* then_branch, Stmt* else_branch);
+Stmt* stmt_if_init      (Arena* arena, Expr* init, Expr* condition, Stmt* then_branch, Stmt* else_branch);
+Stmt* stmt_for          (Arena* arena, Stmt* init, Expr* condition, Stmt* post, Stmt* body, String label);
+Stmt* stmt_range_for    (Arena* arena, Expr* iterator, Expr* iterable, Stmt* body, String label);
 
-Decl* decl_enum(Enum_Item* items, int item_count, Proc_Decl* methods, int method_count);
-Decl* decl_struct(Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count);
-Decl* decl_union(Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count);
-Decl* decl_proc(Aggregate_Item* args, int arg_count, Typespec* return_type, Stmt* body);
+void stmt_print(Stmt* stmt, int indent);
 
 typedef enum Expr_Kind {
     EXPR_NONE = 0,
     EXPR_LIST,
     EXPR_INT,
+    EXPR_FLOAT,
     EXPR_BOOL,
     EXPR_NULL,
-    EXPR_FLT,
-    EXPR_STR,
+    EXPR_STRING,
     EXPR_NAME,
     EXPR_CALL,
     EXPR_UNARY,
@@ -199,125 +131,175 @@ typedef enum Expr_Kind {
     EXPR_TERNARY,
     EXPR_CAST,
     EXPR_INDEX,
-    EXPR_COMPOUND,
-    EXPR_DECL,
-    EXPR_SIZEOF_EXPR,
-    EXPR_SIZEOF_TYPE,
-    EXPR_ALIGNOF_EXPR,
-    EXPR_ALIGNOF_TYPE,
+    EXPR_SIZEOF,
+    EXPR_ALIGNOF,
+    EXPR_TYPEOF,
+    EXPR_POINTER_TYPE,
+    EXPR_ARRAY_TYPE,
+    EXPR_FUNCTION,
+    EXPR_AGGREGATE_STRUCT,
+    EXPR_AGGREGATE_UNION,
+    EXPR_ENUM,
 } Expr_Kind;
-
-typedef struct Expr_List {
-    Expr**  exprs;
-    int     expr_count;
-} Expr_List;
-
-typedef struct Compound_Initializer {
-    enum {
-        NAMED,
-        ORDERED,
-        INDEXED,
-    } kind;
-    struct {
-        Stmt* named;
-        Expr* ordered;
-
-        struct {
-            Expr* index;
-            Stmt* assignment;
-        } indexed;
-    };
-} Compound_Initializer;
 
 struct Expr {
     Expr_Kind kind;
-    union {
-        Expr_List       list;
-
-        u64             ivalue;
-        bool            bvalue;
-        double          fvalue;
-        const char*     svalue;
-        const char*     name;
-
-        struct {
-            const char* name;
-            Expr**      args;
-            int         arg_count;
-        } call;
-
-        struct {
-            Token_Kind  op;
-            Expr*       operand;
-        } unary;
-
-        struct {
-            Token_Kind  op;
-            Expr*       left;
-            Expr*       right;
-        } binary;
-
-        struct {
-            Expr* condition;
-            Expr* then_expr;
-            Expr* else_expr;
-        } ternary;
-
-        struct {
-            Typespec*   type;
-            Expr*       expr;
-        } cast;
-
-        struct {
-            Expr*       expr;
-            Expr*       index;
-        } index;
-
-        struct {
-            Typespec*               type;
-            Compound_Initializer*   initalizers;
-            int                     initializer_count;
-        } compound;
-
-        Decl*           decl;
-
-        Expr*           sizeof_expr;
-        Typespec*       sizeof_type;
-        Expr*           alignof_expr;
-        Typespec*       alignof_type;
-
-        Expr*           typeof_expr;
-    };
 };
 
+typedef struct List_Expr {
+    Expr        base;
+    Expr**      exprs;
+    int         expr_count;
+} List_Expr;
 
-Expr* expr_list(Expr** exprs, int expr_count);
-Expr* expr_int(u64 value);
-Expr* expr_bool(bool value);
-Expr* expr_null(void);
-Expr* expr_flt(double value);
-Expr* expr_str(const char* str);
-Expr* expr_name(const char* name);
-Expr* expr_call(const char* name, Expr** args, int arg_count);
-Expr* expr_unary(Token_Kind op, Expr* operand);
-Expr* expr_binary(Token_Kind op, Expr* left, Expr* right);
-Expr* expr_ternary(Expr* condition, Expr* then_expr, Expr* else_expr);
-Expr* expr_cast(Typespec* type, Expr* expr);
-Expr* expr_index(Expr* expr, Expr* index);
-Expr* expr_compound(Typespec* type, Compound_Initializer* initializers, int initializer_count);
-Expr* expr_decl(Decl* decl);
-Expr* expr_sizeof_expr(Expr* expr);
-Expr* expr_sizeof_type(Typespec* type);
-Expr* expr_alignof_expr(Expr* expr);
-Expr* expr_alignof_type(Typespec* type);
+typedef enum Int_Expr_Flags {
+    EXPR_INT_FLAG_NONE        = 0,
+    EXPR_INT_FLAG_CHAR        = 1 << 0,
+} Int_Expr_Flags;
 
-// Print functions
-//
+typedef struct Int_Expr {
+    Expr        base;
+    u32         flags;
+    u64         value;
+} Int_Expr;
 
-void print_stmt(Stmt* stmt, int indent);
-void print_typespec(Typespec* type, int indent);
-void print_decl(Decl* decl, int indent);
-void print_expr(Expr* expr, int indent);
+typedef struct Float_Expr {
+    Expr        base;
+    double      value;
+} Float_Expr;
+
+typedef struct Bool_Expr {
+    Expr        base;
+    bool        value;
+} Bool_Expr;
+
+typedef struct Null_Expr {
+    Expr        base;
+} Null_Expr;
+
+typedef struct String_Expr {
+    Expr        base;
+    String      value;
+} String_Expr;
+
+typedef struct Name_Expr {
+    Expr        base;
+    String      name;
+} Name_Expr;
+
+typedef struct Call_Expr {
+    Expr        base;
+    String      name;
+    Expr**      args;
+    int         arg_count;
+    // @TODO: Support named arguments
+} Call_Expr;
+
+typedef struct Unary_Expr {
+    Expr        base;
+    Token_Kind  op;
+    Expr*       operand;
+} Unary_Expr;
+
+typedef struct Binary_Expr {
+    Expr        base;
+    Token_Kind  op;
+    Expr*       left;
+    Expr*       right;
+} Binary_Expr;
+
+typedef struct Ternary_Expr {
+    Expr        base;
+    Expr*       condition;
+    Expr*       then_expr;
+    Expr*       else_expr;
+} Ternary_Expr;
+
+typedef struct Cast_Expr {
+    Expr        base;
+    Expr*       type_expr;
+    Expr*       value_expr;
+} Cast_Expr;
+
+typedef struct Index_Expr {
+    Expr        base;
+    Expr*       expr;
+    Expr*       index;
+} Index_Expr;
+
+/**
+ * This is used for operators that operate either or types or expressions:
+ * sizeof, alignof, typeof.
+ */
+typedef struct Type_Operator_Expr {
+    Expr        base;
+    Expr*       expr;
+} Type_Operator_Expr;
+
+typedef struct Pointer_Type_Expr {
+    Expr        base;
+    Expr*       pointed_type;
+} Pointer_Type_Expr;
+
+typedef struct Array_Type_Expr {
+    Expr        base;
+    Expr*       element_type;
+    Expr*       size_expr;
+} Array_Type_Expr;
+
+typedef struct Function_Expr {
+    Expr        base;
+    Expr**      param_types;
+    int         param_count;
+    Expr*       return_type;
+    Stmt*       body;
+} Function_Expr;
+
+
+/** Either a struct or a union declaration */
+typedef struct Aggregate_Type_Expr {
+    Expr    base;
+    Stmt**  members;
+    int     member_count;
+} Aggregate_Type_Expr;
+
+typedef struct Enum_Item {
+    String  name;
+    Expr*   value;
+} Enum_Item;
+
+typedef struct Enum_Expr {
+    Expr            base;
+    Enum_Item*      items;
+    int             item_count;
+    Function_Expr*  methods;
+    int             method_count;
+} Enum_Expr;
+
+Expr* expr_list         (Arena* arena, Expr** exprs, int expr_count);
+Expr* expr_int          (Arena* arena, u64 value);
+Expr* expr_bool         (Arena* arena, bool value);
+Expr* expr_null         (Arena* arena);
+Expr* expr_float        (Arena* arena, double value);
+Expr* expr_str          (Arena* arena, String value);
+Expr* expr_name         (Arena* arena, String name);
+Expr* expr_call         (Arena* arena, String name, Expr** args, int arg_count);
+Expr* expr_unary        (Arena* arena, Token_Kind op, Expr* operand);
+Expr* expr_binary       (Arena* arena, Token_Kind op, Expr* left, Expr* right);
+Expr* expr_ternary      (Arena* arena, Expr* condition, Expr* then_expr, Expr* else_expr);
+Expr* expr_cast         (Arena* arena, Expr* type_expr, Expr* value_expr);
+Expr* expr_index        (Arena* arena, Expr* expr, Expr* index);
+Expr* expr_sizeof       (Arena* arena, Expr* expr);
+Expr* expr_alignof      (Arena* arena, Expr* expr);
+Expr* expr_typeof       (Arena* arena, Expr* expr);
+Expr* expr_pointer_type (Arena* arena, Expr* pointed_type);
+Expr* expr_array_type   (Arena* arena, Expr* element_type, Expr* size_expr);
+Expr* expr_function     (Arena* arena, Expr** param_types, int param_count, Expr* return_type, Stmt* body);
+Expr* expr_struct       (Arena* arena, Stmt** members, int member_count);
+Expr* expr_union        (Arena* arena, Stmt** members, int member_count);
+Expr* expr_enum         (Arena* arena, Enum_Item* items, int item_count, Function_Expr* methods, int method_count);
+
+void expr_print(Expr* expr, int indent);
 
 DECL_TEST(ast);
 

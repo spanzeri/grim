@@ -28,6 +28,21 @@ void *xrealloc(void *ptr, usize size) {
     return new_ptr;
 }
 
+void *xcalloc(usize count, usize size) {
+    void *ptr = calloc(count, size);
+    if (!ptr) {
+        fatal("Out of memory (calloc(%zu, %zu) failed)", count, size);
+    }
+    return ptr;
+}
+
+void *memdup(const void *src, usize size)
+{
+    void *dst = xmalloc(size);
+    memcpy(dst, src, size);
+    return dst;
+}
+
 static usize align_up(usize ptr, usize alignment) {
     usize mask = alignment - 1;
     return (ptr + mask) & ~mask;

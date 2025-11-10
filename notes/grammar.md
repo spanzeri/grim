@@ -28,7 +28,7 @@ func-param     = ident [ { ',' ident } ] ':' type [ '=' expr ]
 struct-decl    = 'struct' aggregate-decl ';'
 enum-decl      = 'enum' ['@flag'] [ int-type ] '{' enum-member { ',' enum-member } [ ',' ] '}' ';'
 union-decl     = 'union' ['@packed'] aggregate-decl ';'
-func-decl      = 'proc' '(' func-param-list ')' [ type ] ( stmt-block | '=>' stmt ';' )
+func-decl      = 'fn' '(' func-param-list ')' [ type ] ( stmt-block | '=>' stmt ';' )
 
 type-decl      = struct-decl | enum-decl | union-decl | func-decl
 

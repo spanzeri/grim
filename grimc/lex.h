@@ -5,15 +5,18 @@
 #ifndef GRIM_LEX_H
 #define GRIM_LEX_H
 
+#include "common.h"
 #include "tok.h"
 
-typedef struct Lexer_Context {
-    const char *source;
-    const char *at;
-} Lexer_Context;
+typedef struct Lexer {
+    String      source;
+    const char* at;
+} Lexer;
 
-Lexer_Context   lexer_init      (const char *source);
-Token           lexer_next_token(Lexer_Context *l);
+Lexer   lexer_init      (String source);
+// @TODO: Add a way to store comments. We don't want them with the stream of
+// tokens, but we do want to keep track of them for tools and the c code generator.
+bool    lexer_next_token(Lexer *lexer, Token *out_token);
 
 DECL_TEST(lex);
 

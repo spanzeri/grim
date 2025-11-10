@@ -12,26 +12,37 @@ typedef enum Numeric_Parse_State {
 } Numeric_Parse_State;
 
 static bool is_digit(u32 c);
-static u32  lexer_peek_codepoint(Lexer_Context *l);
-static u32  lexer_read_codepoint(Lexer_Context *l);
-static bool lexer_match_codepoint(Lexer_Context *l, u32 expected);
-static u64  lexer_scan_integer(Lexer_Context *l, u32 base, Numeric_Parse_State* state);
-static void lexer_scan_numeric_literal(Lexer_Context *l, Token *tok);
-static void lexer_scan_char(Lexer_Context* l, Token* tok);
-static void lexer_scan_string(Lexer_Context* l, Token* tok);
-static void lexer_scan_name_or_keyword(Lexer_Context* l, Token* tok);
+static u32  lexer_peek_codepoint(Lexer *l);
+static u32  lexer_read_codepoint(Lexer *l);
+static bool lexer_match_codepoint(Lexer *l, u32 expected);
+static u64  lexer_scan_integer(Lexer *l, u32 base, Numeric_Parse_State* state);
+static void lexer_scan_numeric_literal(Lexer *l, Token *tok);
+static void lexer_scan_char(Lexer* l, Token* tok);
+static void lexer_scan_string(Lexer* l, Token* tok);
+static void lexer_scan_name_or_keyword(Lexer* l, Token* tok);
 
-Lexer_Context lexer_init(const char *source) {
-    return (Lexer_Context){
-        .source     = source,
-        .at         = source,
+Lexer lexer_init(String source)
+{
+    return (Lexer){
+        .source = source,
+        .at     = source.data,
     };
 }
 
-Token lexer_next_token(Lexer_Context *l) {
+bool lexer_next_token(Lexer *l, Token *out_token)
+{
     Token tok = {0};
 
 repeat:
+    if (l->at == str_end(l->source)) {
+        *out_token = (Token){
+            .kind = TOK_EOF,
+            .start = l->at,
+            .end = l->at,
+        };
+        return true;
+    }
+
     tok.start = l->at;
 
 #define CASE1(c, c1, k1) \
@@ -192,29 +203,33 @@ repeat:
         } break;
 
         default:
-            fprintf(stderr, "Unexpected character: '%c'\n", c);
-            return (Token){ .kind = TOK_EOF };
+            syntax_error("Unexpected character: '%c'", (char)c);
+            return false;
     }
 
     tok.end = l->at;
-    return tok;
+    *out_token = tok;
+    return true;
 
 #undef CASE1
 #undef CASE2
 #undef CASE2_ASSIGN
 }
 
-static u32 lexer_peek_codepoint(Lexer_Context *l) {
+static u32 lexer_peek_codepoint(Lexer *l)
+{
     return (u32)(*l->at);
 }
 
-static u32 lexer_read_codepoint(Lexer_Context *l) {
+static u32 lexer_read_codepoint(Lexer *l)
+{
     u32 c = lexer_peek_codepoint(l);
     if (c != '\0') { l->at++; }
     return c;
 }
 
-static bool lexer_match_codepoint(Lexer_Context *l, u32 expected) {
+static bool lexer_match_codepoint(Lexer *l, u32 expected)
+{
     if (lexer_peek_codepoint(l) == expected) {
         lexer_read_codepoint(l);
         return true;
@@ -222,11 +237,13 @@ static bool lexer_match_codepoint(Lexer_Context *l, u32 expected) {
     return false;
 }
 
-static bool is_digit(u32 c) {
+static bool is_digit(u32 c)
+{
     return c >= '0' && c <= '9';
 }
 
-static u64 lexer_scan_integer(Lexer_Context *l, u32 base, Numeric_Parse_State* state) {
+static u64 lexer_scan_integer(Lexer *l, u32 base, Numeric_Parse_State* state)
+{
     // @TODO: In the case of large floating point numbers, the literal might not fit in u64.
     // We need to handle that case.
 
@@ -283,7 +300,8 @@ static u64 lexer_scan_integer(Lexer_Context *l, u32 base, Numeric_Parse_State* s
     return value;
 }
 
-static void lexer_scan_numeric_literal(Lexer_Context *l, Token *tok) {
+static void lexer_scan_numeric_literal(Lexer *l, Token *tok)
+{
     u32 base = 10;
 
     Numeric_Parse_State parse_state = OK;
@@ -351,9 +369,9 @@ static void lexer_scan_numeric_literal(Lexer_Context *l, Token *tok) {
             if (c == '+' || c == '-') {
                 lexer_read_codepoint(l);
             }
-            u32 exp_start = (u32)(l->at - l->source);
+            u32 exp_start = (u32)(l->at - l->source.data);
             lexer_scan_integer(l, 10, &parse_state);
-            if (l->at == l->source + exp_start) {
+            if (l->at == l->source.data + exp_start) {
                 syntax_error("Floating-point literal exponent requires digits");
                 parse_state = INVALID;
             }
@@ -382,7 +400,8 @@ static void lexer_scan_numeric_literal(Lexer_Context *l, Token *tok) {
     }
 }
 
-static void lexer_scan_char(Lexer_Context* l, Token* tok) {
+static void lexer_scan_char(Lexer* l, Token* tok)
+{
     // @TODO: Should we support multi-byte characters and leave to the semantic
     // analysis to check if we are trying to store it somewhere it doesn't fit?
     tok->kind = TOK_CHAR_LITERAL;
@@ -429,7 +448,8 @@ static void lexer_scan_char(Lexer_Context* l, Token* tok) {
     }
 }
 
-static void lexer_scan_string(Lexer_Context* l, Token* tok) {
+static void lexer_scan_string(Lexer* l, Token* tok)
+{
     // @TODO: We are not currently parsing or storing the string buffer.
     // We will need to do that at some point, substituting escape sequences.
 
@@ -485,18 +505,19 @@ static void lexer_scan_string(Lexer_Context* l, Token* tok) {
 
     darray_add(buff, '\0'); // Null-terminate the string
     tok->end = l->at - 1;   // Exclude the closing quote
-    tok->svalue = buff;
+    // @TODO: this is a memory leak. We might be better off allocating the string
+    // directly on a builder or something similar.
+    tok->svalue = str_from_cstr(buff);
 }
 
 const String kw_strings[] = {
-    [KW_PROC]       = str_from_lit("proc"),
+    [KW_FN]         = str_from_lit("fn"),
     [KW_RETURN]     = str_from_lit("return"),
     [KW_IF]         = str_from_lit("if"),
     [KW_ELSE]       = str_from_lit("else"),
-    [KW_WHILE]      = str_from_lit("while"),
     [KW_FOR]        = str_from_lit("for"),
-    [KW_DO]         = str_from_lit("do"),
     [KW_SWITCH]     = str_from_lit("switch"),
+    [KW_CASE]       = str_from_lit("case"),
     [KW_BREAK]      = str_from_lit("break"),
     [KW_CONTINUE]   = str_from_lit("continue"),
     [KW_CONST]      = str_from_lit("const"),
@@ -511,7 +532,8 @@ const String kw_strings[] = {
     [KW_NULL]       = str_from_lit("null"),
 };
 
-static void lexer_scan_name_or_keyword(Lexer_Context* l, Token* tok) {
+static void lexer_scan_name_or_keyword(Lexer* l, Token* tok)
+{
     for (;;) {
         u32 c2 = lexer_peek_codepoint(l);
         if (!((c2 >= 'a' && c2 <= 'z') || (c2 >= 'A' && c2 <= 'Z') || is_digit(c2) || c2 == '_')) {
@@ -533,13 +555,14 @@ static void lexer_scan_name_or_keyword(Lexer_Context* l, Token* tok) {
     }
 
     tok->kind = TOK_IDENTIFIER;
-    tok->name = str_intern_range(tok->start, l->at);
+    tok->name = (String){tok->start, (usize)(l->at - tok->start)};
 }
 
-TEST(lex) {
+TEST(lex)
+{
     // Generic test
     //
-    const char *source = "+XY=(XY)1234+994 _abC + _01_ + AZ09";
+    String source = str_from_lit("+XY=(XY)1234+994 _abC + _01_ + AZ09");
     Token expected_tokens[] = {
         { .kind = '+' },
         { .kind = TOK_IDENTIFIER, .start = "XY" },
@@ -559,9 +582,11 @@ TEST(lex) {
     };
 
     Token* tokens = NULL;
-    Lexer_Context lex = lexer_init(source);
+    Lexer lex = lexer_init(source);
     for (;;) {
-        Token tok = lexer_next_token(&lex);
+        Token tok;
+        bool ok = lexer_next_token(&lex, &tok);
+        ASSERT(ok, "lexer_next_token failed");
         darray_add(tokens, tok);
         if (tok.kind == TOK_EOF) break;
     }
@@ -578,18 +603,18 @@ TEST(lex) {
         }
         else if (tokens[i].kind == TOK_IDENTIFIER) {
             ASSERT(
-                tokens[i].name == str_intern(expected_tokens[i].start),
-                "Token %d: got identifier '%s', expected '%s'", i,
-                tokens[i].name, expected_tokens[i].start);
+                str_eq(tokens[i].name, str_from_cstr(expected_tokens[i].start)),
+                "Token %d: got identifier '%.*s', expected '%s'", i,
+                STR_FMT(tokens[i].name), expected_tokens[i].start);
         }
     }
 
-    ASSERT(tokens[1].name == tokens[4].name,
-        "Identifier interning failed: tokens[1] = '%s', tokens[4] = '%s'",
-        tokens[1].name, tokens[4].name);
-    ASSERT(strcmp(tokens[1].name, "XY") == 0,
-        "Identifier interning failed: tokens[1] = '%s', expected 'XY'",
-        tokens[1].name);
+    ASSERT(str_eq(tokens[1].name, tokens[4].name),
+        "Identifier interning failed: tokens[1] = '%.*s', tokens[4] = '%.*s'",
+        STR_FMT(tokens[1].name), STR_FMT(tokens[4].name));
+    ASSERT(str_eq(tokens[1].name, str_from_lit("XY")) == 0,
+        "Identifier interning failed: tokens[1] = '%.*s', expected 'XY'",
+        STR_FMT(tokens[1].name));
 
     for (int i = 0; i < darray_len(tokens); i++) {
         token_print(tokens[i]);
@@ -597,45 +622,71 @@ TEST(lex) {
 
     darray_free(tokens);
 
-#define TEST_INT_LITERAL(expected)                                                                              \
-    tok = lexer_next_token(&lex);                                                                               \
-    ASSERT(tok.kind == TOK_INT_LITERAL, "Expected INT_LITERAL, got %s", token_kind_to_string(tok.kind));        \
-    ASSERT(tok.ivalue == (expected), "Expected ivalue %llu, got %llu", (u64)(expected), tok.ivalue)
+#define TEST_DO_TOK() Token tok; ASSERT(lexer_next_token(&lex, &tok), "lexer_next_token failed")
 
-#define TEST_FLT_LITERAL(expected)                                                                              \
-    tok = lexer_next_token(&lex);                                                                               \
-    ASSERT(tok.kind == TOK_FLT_LITERAL, "Expected FLT_LITERAL, got %s", token_kind_to_string(tok.kind));        \
-    ASSERT(fabs(tok.fvalue - (expected)) < DBL_EPSILON, "Expected fvalue %f, got %f", expected, tok.fvalue)
+#define TEST_INT_LITERAL(expected)                                                              \
+    do {                                                                                        \
+        TEST_DO_TOK();                                                                          \
+        ASSERT(                                                                                 \
+            tok.kind == TOK_INT_LITERAL,                                                        \
+            "Expected INT_LITERAL, got %s", token_kind_to_string(tok.kind));                    \
+        ASSERT(                                                                                 \
+            tok.ivalue == (expected),                                                           \
+            "Expected ivalue %llu, got %llu", (u64)(expected), tok.ivalue);                     \
+    } while (0)
 
-#define TEST_CHAR_LITERAL(expected)                                                                             \
-    tok = lexer_next_token(&lex);                                                                               \
-    ASSERT(tok.kind == TOK_CHAR_LITERAL, "Expected CHAR_LITERAL, got %s", token_kind_to_string(tok.kind));      \
-    ASSERT(                                                                                                     \
-        tok.cvalue == (expected),                                                                               \
-        "Expected cvalue '%c' (%u), got '%c' (%u)",                                                             \
-        (char)(expected), (u32)(expected), (char)tok.cvalue, tok.cvalue)
+#define TEST_FLT_LITERAL(expected)                                                              \
+    do {                                                                                        \
+        TEST_DO_TOK();                                                                          \
+        ASSERT(                                                                                 \
+            tok.kind == TOK_FLT_LITERAL,                                                        \
+            "Expected FLT_LITERAL, got %s", token_kind_to_string(tok.kind));                    \
+        ASSERT(                                                                                 \
+            fabs(tok.fvalue - (expected)) < DBL_EPSILON,                                        \
+            "Expected fvalue %f, got %f", expected, tok.fvalue);                                \
+    } while (0)
 
-#define TEST_STRING_LITERAL(expected)                                                                           \
-    tok = lexer_next_token(&lex);                                                                               \
-    ASSERT(tok.kind == TOK_STRING_LITERAL, "Expected STRING_LITERAL, got %s", token_kind_to_string(tok.kind));  \
-    ASSERT(                                                                                                     \
-        strncmp(tok.svalue, (expected), (size_t)darray_len(tok.svalue) - 1) == 0                                \
-            && strlen(expected) == (darray_len(tok.svalue) - 1),                                                \
-        "Expected svalue \"%s\", got \"%s\". Expected len: %llu, got: %llu.",                                   \
-        (expected), tok.svalue, (u64)strlen(expected), (u64)(darray_len(tok.svalue) - 1));                      \
-    darray_free(tok.svalue)
+#define TEST_CHAR_LITERAL(expected)                                                             \
+    do {                                                                                        \
+        TEST_DO_TOK();                                                                          \
+        ASSERT(                                                                                 \
+            tok.kind == TOK_CHAR_LITERAL,                                                       \
+            "Expected CHAR_LITERAL, got %s", token_kind_to_string(tok.kind));                   \
+        ASSERT(                                                                                 \
+            tok.cvalue == (expected),                                                           \
+            "Expected cvalue '%c' (%u), got '%c' (%u)",                                         \
+            (char)(expected), (u32)(expected), (char)tok.cvalue, tok.cvalue);                   \
+    } while (0)
+
+#define TEST_STRING_LITERAL(expected)                                                           \
+    do {                                                                                        \
+        TEST_DO_TOK();                                                                          \
+        ASSERT(                                                                                 \
+            tok.kind == TOK_STRING_LITERAL,                                                     \
+            "Expected STRING_LITERAL, got %s", token_kind_to_string(tok.kind));                 \
+        ASSERT(                                                                                 \
+            str_eq(tok.svalue, str_from_lit(expected)),                                         \
+            "Expected svalue \"%s\", got \"%.*s\". Expected len: %zu, got: %zu.",               \
+            (expected), STR_FMT(tok.svalue), strlen(expected), tok.svalue.len);                 \
+    } while (0)
 
 #define TEST_TOK_KIND(expected)                                                                 \
-    tok = lexer_next_token(&lex);                                                               \
-    ASSERT(tok.kind == (expected), "Expected token kind %s, got %s", token_kind_to_string(expected), token_kind_to_string(tok.kind))
+    do {                                                                                        \
+        TEST_DO_TOK();                                                                          \
+        ASSERT(                                                                                 \
+            tok.kind == (expected),                                                             \
+            "Expected token kind %s, got %s",                                                   \
+            token_kind_to_string(expected), token_kind_to_string(tok.kind));                    \
+    } while (0)
 
-    Token tok;
+
+    String src = str_from_lit(
+        "0 1 42 1234567890 0x0 0x1 0xA 0xF 0x10 0x2A 0b0 0b1 0b10 0b101 0o0 0o7 0o10 0o9 1AC0 "
+        "18446744073709551615 0xFFFFFFFFFFFFFFFF 18446744073709551616 0x_01 0x1__2 0x12_ 1_000_000 0b1010_1011");
 
     // Integer test
     //
-    lex = lexer_init(
-        "0 1 42 1234567890 0x0 0x1 0xA 0xF 0x10 0x2A 0b0 0b1 0b10 0b101 0o0 0o7 0o10 0o9 1AC0 "
-        "18446744073709551615 0xFFFFFFFFFFFFFFFF 18446744073709551616 0x_01 0x1__2 0x12_ 1_000_000 0b1010_1011");
+    lex = lexer_init(src);
 
     TEST_INT_LITERAL(0);
     TEST_INT_LITERAL(1);
@@ -664,11 +715,11 @@ TEST(lex) {
     TEST_INT_LITERAL(0);        // Numeric literal cannot end with underscore
     TEST_INT_LITERAL(1000000);
     TEST_INT_LITERAL(0b10101011);
-    ASSERT(lexer_next_token(&lex).kind == TOK_EOF);
+    TEST_TOK_KIND(TOK_EOF);
 
     // Floating-point test
     //
-    lex = lexer_init("0.0 1.0 .150 .1e-4 3.14159 1e3 1E3 1.5e2 1.5E2 1.5e-2 1.5E-2 0x1.4p+3");
+    lex = lexer_init(str_from_lit("0.0 1.0 .150 .1e-4 3.14159 1e3 1E3 1.5e2 1.5E2 1.5e-2 1.5E-2 0x1.4p+3"));
 
     TEST_FLT_LITERAL(0.0);
     TEST_FLT_LITERAL(1.0);
@@ -682,11 +733,11 @@ TEST(lex) {
     TEST_FLT_LITERAL( 0.015);
     TEST_FLT_LITERAL(0.015);
     TEST_FLT_LITERAL(10.0);     // Hexadecimal floating-point literal
-    ASSERT(lexer_next_token(&lex).kind == TOK_EOF);
+    TEST_TOK_KIND(TOK_EOF);
 
     // Character literal test
     //
-    lex = lexer_init("'a' 'Z' '0' '\\n' '\\t' '\\'' '\\\\' '\\0' '\\x'");
+    lex = lexer_init(str_from_lit("'a' 'Z' '0' '\\n' '\\t' '\\'' '\\\\' '\\0' '\\x'"));
 
     TEST_CHAR_LITERAL('a');
     TEST_CHAR_LITERAL('Z');
@@ -697,11 +748,12 @@ TEST(lex) {
     TEST_CHAR_LITERAL('\\');
     TEST_CHAR_LITERAL('\0');
     TEST_CHAR_LITERAL(0);       // Unknown escape sequence: \x
-    ASSERT(lexer_next_token(&lex).kind == TOK_EOF);
+    TEST_TOK_KIND(TOK_EOF);
 
     // String literal test
     //
-    lex = lexer_init("\"Hello, World!\" \"Line1\\nLine2\" \"Tab\\tCharacter\" \"Quote:\\\"\" \"Backslash:\\\\\" \"Unterminated string");
+    lex = lexer_init(str_from_lit(
+        "\"Hello, World!\" \"Line1\\nLine2\" \"Tab\\tCharacter\" \"Quote:\\\"\" \"Backslash:\\\\\" \"Unterminated string"));
 
     TEST_STRING_LITERAL("Hello, World!");
     TEST_STRING_LITERAL("Line1\nLine2");
@@ -709,11 +761,12 @@ TEST(lex) {
     TEST_STRING_LITERAL("Quote:\"");
     TEST_STRING_LITERAL("Backslash:\\");
     TEST_STRING_LITERAL("Unterminated string"); // Unterminated string literal
-    ASSERT(lexer_next_token(&lex).kind == TOK_EOF);
+    TEST_TOK_KIND(TOK_EOF);
 
     // Operators
     //
-    lex = lexer_init("= == ! != < <= << <<= > >= >> >>= & && &&= | || ||= + += ++ - -= -- * *= / /= % %= ^ ^= := ::");
+    lex = lexer_init(str_from_lit(
+        "= == ! != < <= << <<= > >= >> >>= & && &&= | || ||= + += ++ - -= -- * *= / /= % %= ^ ^= := ::"));
     TEST_TOK_KIND('=');
     TEST_TOK_KIND(TOK_EQ);
     TEST_TOK_KIND('!');

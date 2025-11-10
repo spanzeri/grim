@@ -1,825 +1,665 @@
 #include "ast.h"
 
-thread_local Arena* ast_arena;
-
-void ast_set_arena(Arena* arena) {
-    ast_arena = arena;
-}
-
-static void* ast_alloc(size_t size) {
-    ASSERT(ast_arena != NULL, "AST arena is not set");
-    return arena_alloc(ast_arena, size);
-}
-
-static void* ast_dup(const void* src, size_t size) {
-    ASSERT(ast_arena != NULL, "AST arena is not set");
-    void* dst = arena_alloc(ast_arena, size);
-    memcpy(dst, src, size);
-    return dst;
-}
-
-#define AST_DUP(ptr, count) ast_dup((ptr), sizeof(*(ptr)) * (size_t)(count))
-
 //
-// Node allocation
+// Statements
 //
 
-static Stmt* new_stmt(Stmt_Kind kind) {
-    Stmt* stmt = ast_alloc(sizeof(Stmt));
-    memset(stmt, 0, sizeof(Stmt));
+static Stmt* ast_alloc_stmt(Arena* arena, Stmt_Kind kind, usize size)
+{
+    Stmt* stmt = memset(arena_alloc(arena, size), 0, size);
     stmt->kind = kind;
     return stmt;
 }
 
-static Typespec* new_typespec(Typespec_Kind kind) {
-    Typespec* ts = ast_alloc(sizeof(Typespec));
-    memset(ts, 0, sizeof(Typespec));
-    ts->kind = kind;
-    return ts;
+#define STMT_ALLOC(arena, Type, kind)   ((Type*)ast_alloc_stmt(arena, kind, sizeof(Type)))
+
+Stmt* stmt_assignment(Arena* arena, Token_Kind op, Expr* left, Expr* right)
+{
+    Assignment_Stmt* stmt = STMT_ALLOC(arena, Assignment_Stmt, STMT_ASSIGNMENT);
+    stmt->op    = op;
+    stmt->left  = left;
+    stmt->right = right;
+    return &stmt->base;
 }
 
-static Decl* new_decl(Decl_Kind kind) {
-    Decl* decl = ast_alloc(sizeof(Decl));
-    memset(decl, 0, sizeof(Decl));
-    decl->kind = kind;
-    return decl;
+Stmt* stmt_decl_var(Arena* arena, Expr* left, Expr* typespec, Expr* right)
+{
+    Decl_Stmt* stmt = STMT_ALLOC(arena, Decl_Stmt, STMT_DECL_VAR);
+    stmt->left     = left;
+    stmt->typespec = typespec;
+    stmt->right    = right;
+    return &stmt->base;
 }
 
-static Expr* new_expr(Expr_Kind kind) {
-    Expr* expr = ast_alloc(sizeof(Expr));
-    memset(expr, 0, sizeof(Expr));
-    expr->kind = kind;
-    return expr;
+Stmt* stmt_decl_const(Arena* arena, Expr* left, Expr* typespec, Expr* right)
+{
+    Decl_Stmt* stmt = STMT_ALLOC(arena, Decl_Stmt, STMT_DECL_CONST);
+    stmt->left     = left;
+    stmt->typespec = typespec;
+    stmt->right    = right;
+    return &stmt->base;
 }
 
-//
-// Stmt
-//
-
-Stmt* stmt_assign(Token_Kind op, Expr* left, Expr* right) {
-    Stmt* stmt = new_stmt(STMT_ASSIGN);
-    stmt->assignment.op    = op;
-    stmt->assignment.left  = left;
-    stmt->assignment.right = right;
-    return stmt;
-}
-
-static Stmt* new_stmt_decl(Stmt_Kind kind, Expr* left, Typespec* type, Expr* right) {
-    Stmt* stmt = new_stmt(kind);
-    stmt->decl.left  = left;
-    stmt->decl.type  = type;
-    stmt->decl.right = right;
-    return stmt;
-}
-
-Stmt* stmt_decl_var(Expr* left, Typespec* type, Expr* right) {
-    return new_stmt_decl(STMT_DECL_VAR, left, type, right);
-}
-
-Stmt* stmt_decl_const(Expr* left, Typespec* type, Expr* right) {
-    return new_stmt_decl(STMT_DECL_CONST, left, type, right);
-}
-
-Stmt* stmt_expr(Expr* expr) {
-    Stmt* stmt = new_stmt(STMT_EXPR);
+Stmt* stmt_expr(Arena* arena, Expr* expr)
+{
+    Expr_Stmt* stmt = STMT_ALLOC(arena, Expr_Stmt, STMT_EXPR);
     stmt->expr = expr;
-    return stmt;
+    return &stmt->base;
 }
 
-Stmt* stmt_return(Expr* expr) {
-    Stmt* stmt = new_stmt(STMT_RETURN);
+Stmt* stmt_return(Arena* arena, Expr* expr)
+{
+    Return_Stmt* stmt = STMT_ALLOC(arena, Return_Stmt, STMT_RETURN);
     stmt->expr = expr;
-    return stmt;
+    return &stmt->base;
 }
 
-Stmt* stmt_break(const char* label) {
-    Stmt* stmt = new_stmt(STMT_BREAK);
-    stmt->control.label = str_from_cstr(label);
-    return stmt;
+Stmt* stmt_break(Arena* arena, String label)
+{
+    Control_Stmt* stmt = STMT_ALLOC(arena, Control_Stmt, STMT_CONTROL_BREAK);
+    stmt->label = label;
+    return &stmt->base;
 }
 
-Stmt* stmt_continue(const char* label) {
-    Stmt* stmt = new_stmt(STMT_BREAK);
-    stmt->control.label = str_from_cstr(label);
-    return stmt;
+Stmt* stmt_continue(Arena* arena, String label)
+{
+    Control_Stmt* stmt = STMT_ALLOC(arena, Control_Stmt, STMT_CONTROL_CONTINUE);
+    stmt->label = label;
+    return &stmt->base;
 }
 
-Stmt* stmt_block(Stmt** stmts, int stmt_count) {
-    Stmt* stmt = new_stmt(STMT_BLOCK);
-    stmt->block.stmts      = AST_DUP(stmts, stmt_count);
-    stmt->block.stmt_count = stmt_count;
-    return stmt;
+Stmt* stmt_switch(Arena* arena, Switch_Case* cases, int case_count, Stmt* default_case)
+{
+    Switch_Stmt* stmt = STMT_ALLOC(arena, Switch_Stmt, STMT_SWITCH);
+    stmt->cases        = arena_dup_array(arena, cases, case_count);
+    stmt->case_count   = case_count;
+    stmt->default_case = default_case;
+    return &stmt->base;
 }
 
-Stmt* stmt_if(Expr* condition, Stmt* then_branch, Stmt* else_branch) {
-    Stmt* stmt = new_stmt(STMT_IF);
-    stmt->if_stmt.condition   = condition;
-    stmt->if_stmt.then_branch = then_branch;
-    stmt->if_stmt.else_branch = else_branch;
-    return stmt;
+Stmt* stmt_block(Arena* arena, Stmt** stmts, int stmt_count, String label)
+{
+    Block_Stmt* stmt = STMT_ALLOC(arena, Block_Stmt, STMT_BLOCK);
+    stmt->stmts      = arena_dup_array(arena, stmts, stmt_count);
+    stmt->stmt_count = stmt_count;
+    stmt->label      = label;
+    return &stmt->base;
 }
 
-Stmt* stmt_while(Expr* condition, Stmt* body) {
-    Stmt* stmt = new_stmt(STMT_WHILE);
-    stmt->while_stmt.condition = condition;
-    stmt->while_stmt.body      = body;
-    return stmt;
+Stmt* stmt_if(Arena* arena, Expr* condition, Stmt* then_branch, Stmt* else_branch)
+{
+    return stmt_if_init(arena, NULL, condition, then_branch, else_branch);
 }
 
-Stmt* stmt_do_while(Stmt* body, Expr* condition) {
-    Stmt* stmt = new_stmt(STMT_DO);
-    stmt->while_stmt.body      = body;
-    stmt->while_stmt.condition = condition;
-    return stmt;
+Stmt* stmt_if_init(Arena* arena, Expr* init, Expr* condition, Stmt* then_branch, Stmt* else_branch)
+{
+    If_Stmt* stmt = STMT_ALLOC(arena, If_Stmt, STMT_IF);
+    stmt->init        = init;
+    stmt->condition   = condition;
+    stmt->then_branch = then_branch;
+    stmt->else_branch = else_branch;
+    return &stmt->base;
 }
 
-//
-// Typespec
-//
-
-Typespec* typespec_name(const char* name) {
-    Typespec* ts = new_typespec(TYPESPEC_NAME);
-    ts->name = name;
-    return ts;
+Stmt* stmt_for(Arena* arena, Stmt* init, Expr* condition, Stmt* post, Stmt* body, String label)
+{
+    For_Stmt* stmt = STMT_ALLOC(arena, For_Stmt, STMT_FOR);
+    stmt->init      = init;
+    stmt->condition = condition;
+    stmt->post      = post;
+    stmt->body      = body;
+    stmt->label     = label;
+    return &stmt->base;
 }
 
-Typespec* typespec_array(Typespec* base, Expr* size, bool is_const) {
-    Typespec* ts = new_typespec(TYPESPEC_ARRAY);
-    ts->array.base     = base;
-    ts->array.size     = size;
-    ts->array.is_const = is_const;
-    return ts;
+Stmt* stmt_range_for(Arena* arena, Expr* iterator, Expr* iterable, Stmt* body, String label)
+{
+    Range_For_Stmt* stmt = STMT_ALLOC(arena, Range_For_Stmt, STMT_RANGE_FOR);
+    stmt->iterator = iterator;
+    stmt->iterable = iterable;
+    stmt->body     = body;
+    stmt->label    = label;
+    return &stmt->base;
 }
 
-Typespec* typespec_proc(Typespec** params, int param_count, Typespec* return_type) {
-    Typespec* ts = new_typespec(TYPESPEC_PROC);
-    ts->proc.return_type = return_type;
-    ts->proc.params      = AST_DUP(params, param_count);
-    ts->proc.param_count = param_count;
-    return ts;
-}
+void stmt_print(Stmt* stmt, int indent)
+{
+    ASSERT(stmt);
 
-Typespec* typespec_pointer(Typespec* base, bool is_const) {
-    Typespec* ts = new_typespec(TYPESPEC_POINTER);
-    ts->pointer.base     = base;
-    ts->pointer.is_const = is_const;
-    return ts;
-}
+    printf("%*s", indent, "");
 
-//
-// Decl
-//
+    switch (stmt->kind) {
+        case STMT_ASSIGNMENT: {
+            Assignment_Stmt* s = (Assignment_Stmt*)stmt;
+            printf("(%s ", token_kind_to_string(s->op));
+            expr_print(s->left, 0);
+            expr_print(s->right, 0);
+            printf(")");
+        } break;
 
-Decl* decl_enum(Enum_Item* items, int item_count, Proc_Decl* methods, int method_count) {
-    Decl* decl = new_decl(DECL_ENUM);
-    decl->enum_decl.items        = AST_DUP(items, item_count);
-    decl->enum_decl.item_count   = item_count;
-    decl->enum_decl.methods      = methods;
-    decl->enum_decl.method_count = method_count;
-    return decl;
-}
+        case STMT_DECL_VAR: {
+            Decl_Stmt* s = (Decl_Stmt*)stmt;
+            printf("(%s ", stmt->kind == STMT_DECL_VAR ? "var" : "const");
+            expr_print(s->left, 0);
+            if (s->typespec) {
+                printf(" :");
+                expr_print(s->typespec, 0);
+            }
+            if (s->right) {
+                printf(" ");
+                expr_print(s->right, 0);
+            }
+            printf(")");
+        } break;
 
-Decl* decl_struct(Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count) {
-    Decl* decl = new_decl(DECL_STRUCT);
-    decl->aggregate_decl.items        = AST_DUP(items, item_count);
-    decl->aggregate_decl.item_count   = item_count;
-    decl->aggregate_decl.methods      = methods;
-    decl->aggregate_decl.method_count = method_count;
-    return decl;
-}
+        case STMT_EXPR: {
+            Expr_Stmt* s = (Expr_Stmt*)stmt;
+            expr_print(s->expr, 0);
+        } break;
 
-Decl* decl_union(Aggregate_Item* items, int item_count, Proc_Decl* methods, int method_count) {
-    Decl* decl = new_decl(DECL_UNION);
-    decl->aggregate_decl.items        = AST_DUP(items, item_count);
-    decl->aggregate_decl.item_count   = item_count;
-    decl->aggregate_decl.methods      = AST_DUP(methods, method_count);
-    decl->aggregate_decl.method_count = method_count;
-    return decl;
-}
+        case STMT_RETURN: {
+            Return_Stmt* s = (Return_Stmt*)stmt;
+            printf("(return");
+            if (s->expr) {
+                expr_print(s->expr, 1);
+            }
+            printf(")");
+        } break;
 
-Decl* decl_proc(Aggregate_Item* args, int arg_count, Typespec* return_type, Stmt* body) {
-    Decl* decl = new_decl(DECL_PROC);
-    decl->proc_decl.args         = AST_DUP(args, arg_count);
-    decl->proc_decl.arg_count    = arg_count;
-    decl->proc_decl.return_type  = return_type;
-    decl->proc_decl.body         = body;
-    return decl;
+        case STMT_CONTROL_BREAK:
+        case STMT_CONTROL_CONTINUE: {
+            Control_Stmt* s = (Control_Stmt*)stmt;
+            printf("(%s", stmt->kind == STMT_CONTROL_BREAK ? "break" : "continue");
+            if (!str_is_empty(s->label)) {
+                printf(" %.*s", STR_FMT(s->label));
+            }
+            printf(")");
+        } break;
+
+        case STMT_IF: {
+            If_Stmt* s = (If_Stmt*)stmt;
+            printf("(if");
+            if (s->init) {
+                printf(" :init ");
+                expr_print(s->init, 0);
+            }
+            printf(" ");
+            expr_print(s->condition, 0);
+            printf("\n");
+            stmt_print(s->then_branch, indent + 4);
+            if (s->else_branch) {
+                printf("\n%*s:else\n", indent + 2, "");
+                stmt_print(s->else_branch, indent + 4);
+            }
+            printf("\n%*s)", indent, "");
+        } break;
+
+        case STMT_BLOCK: {
+            Block_Stmt* s = (Block_Stmt*)stmt;
+            printf("(block\n");
+            for (int i = 0; i < s->stmt_count; i++) {
+                if (i != 0) { printf("\n"); }
+                stmt_print(s->stmts[i], indent + 2);
+            }
+            printf(")");
+        } break;
+
+        case STMT_FOR: {
+            For_Stmt* s = (For_Stmt*)stmt;
+            printf("(for");
+            if (!str_is_empty(s->label)) {
+                printf(" %.*s: ", STR_FMT(s->label));
+            }
+            if (s->init) {
+                printf(" :init ");
+                stmt_print(s->init, 0);
+            }
+            if (s->condition) {
+                printf(" :cond ");
+                expr_print(s->condition, 0);
+            }
+            if (s->post) {
+                printf(" :post ");
+                stmt_print(s->post, 0);
+            }
+            printf("\n");
+            stmt_print(s->body, indent + 2);
+            printf("%*s)", indent, "");
+        } break;
+
+        case STMT_RANGE_FOR: {
+            Range_For_Stmt* s = (Range_For_Stmt*)stmt;
+            printf("(range_for");
+            if (!str_is_empty(s->label)) {
+                printf(" %.*s: ", STR_FMT(s->label));
+            }
+            printf(" :iter ");
+            expr_print(s->iterator, 0);
+            printf(" :in ");
+            expr_print(s->iterable, 0);
+            printf("\n");
+            stmt_print(s->body, indent + 2);
+            printf("%*s)", indent, "");
+        } break;
+
+        default: ASSERT_ALWAYS("Unknown Stmt_Kind: %d", stmt->kind); break;
+    }
 }
 
 //
 // Expr
 //
 
-Expr* expr_list(Expr** exprs, int expr_count) {
-    Expr* expr = new_expr(EXPR_LIST);
-    expr->list.exprs      = AST_DUP(exprs, expr_count);
-    expr->list.expr_count = expr_count;
+static Expr* ast_alloc_expr(Arena* arena, Expr_Kind kind, usize size)
+{
+    Expr* expr = memset(arena_alloc(arena, size), 0, size);
+    expr->kind = kind;
     return expr;
 }
 
-Expr* expr_int(u64 value) {
-    Expr* expr = new_expr(EXPR_INT);
-    expr->ivalue = value;
-    return expr;
+#define EXPR_ALLOC(arena, Type, kind)   ((Type*)ast_alloc_expr(arena, kind, sizeof(Type)))
+
+Expr* expr_list(Arena* arena, Expr** exprs, int expr_count)
+{
+    List_Expr* expr = EXPR_ALLOC(arena, List_Expr, EXPR_LIST);
+    expr->exprs      = arena_dup_array(arena, exprs, expr_count);
+    expr->expr_count = expr_count;
+    return &expr->base;
 }
 
-Expr* expr_bool(bool value) {
-    Expr* expr = new_expr(EXPR_BOOL);
-    expr->bvalue = value;
-    return expr;
+Expr* expr_int(Arena* arena, u64 value)
+{
+    Int_Expr* expr = EXPR_ALLOC(arena, Int_Expr, EXPR_INT);
+    expr->value = value;
+    return &expr->base;
 }
 
-Expr* expr_null(void) {
-    Expr* expr = new_expr(EXPR_NULL);
-    return expr;
+Expr* expr_bool(Arena* arena, bool value)
+{
+    Bool_Expr* expr = EXPR_ALLOC(arena, Bool_Expr, EXPR_BOOL);
+    expr->value = value;
+    return &expr->base;
 }
 
-Expr* expr_flt(double value) {
-    Expr* expr = new_expr(EXPR_FLT);
-    expr->fvalue = value;
-    return expr;
+Expr* expr_null(Arena* arena)
+{
+    Null_Expr* expr = EXPR_ALLOC(arena, Null_Expr, EXPR_NULL);
+    return &expr->base;
 }
 
-Expr* expr_str(const char* str) {
-    Expr* expr = new_expr(EXPR_STR);
-    expr->svalue = str;
-    return expr;
+Expr* expr_float(Arena* arena, double value)
+{
+    Float_Expr* expr = EXPR_ALLOC(arena, Float_Expr, EXPR_FLOAT);
+    expr->value = value;
+    return &expr->base;
 }
 
-Expr* expr_name(const char* name) {
-    Expr* expr = new_expr(EXPR_NAME);
-    expr->name = str_intern(name);
-    return expr;
+Expr* expr_str(Arena* arena, String value)
+{
+    String_Expr* expr = EXPR_ALLOC(arena, String_Expr, EXPR_STRING);
+    expr->value = value;
+    return &expr->base;
 }
 
-Expr* expr_call(const char* name, Expr** args, int arg_count) {
-    Expr* expr = new_expr(EXPR_CALL);
-    expr->call.name      = name;
-    expr->call.args      = AST_DUP(args, arg_count);
-    expr->call.arg_count = arg_count;
-    return expr;
+Expr* expr_name(Arena* arena, String name)
+{
+    Name_Expr* expr = EXPR_ALLOC(arena, Name_Expr, EXPR_NAME);
+    expr->name = name;
+    return &expr->base;
 }
 
-Expr* expr_unary(Token_Kind op, Expr* operand) {
-    Expr* expr = new_expr(EXPR_UNARY);
-    expr->unary.op      = op;
-    expr->unary.operand = operand;
-    return expr;
+Expr* expr_call(Arena* arena, String name, Expr** args, int arg_count)
+{
+    Call_Expr* expr = EXPR_ALLOC(arena, Call_Expr, EXPR_CALL);
+    expr->name      = name;
+    expr->args      = arena_dup_array(arena, args, arg_count);
+    expr->arg_count = arg_count;
+    return &expr->base;
 }
 
-Expr* expr_binary(Token_Kind op, Expr* left, Expr* right) {
-    Expr* expr = new_expr(EXPR_BINARY);
-    expr->binary.op    = op;
-    expr->binary.left  = left;
-    expr->binary.right = right;
-    return expr;
+Expr* expr_unary(Arena* arena, Token_Kind op, Expr* operand)
+{
+    Unary_Expr* expr = EXPR_ALLOC(arena, Unary_Expr, EXPR_UNARY);
+    expr->op      = op;
+    expr->operand = operand;
+    return &expr->base;
 }
 
-Expr* expr_ternary(Expr* condition, Expr* then_expr, Expr* else_expr) {
-    Expr* expr = new_expr(EXPR_TERNARY);
-    expr->ternary.condition = condition;
-    expr->ternary.then_expr = then_expr;
-    expr->ternary.else_expr = else_expr;
-    return expr;
+Expr* expr_binary(Arena* arena, Token_Kind op, Expr* left, Expr* right)
+{
+    Binary_Expr* expr = EXPR_ALLOC(arena, Binary_Expr, EXPR_BINARY);
+    expr->op    = op;
+    expr->left  = left;
+    expr->right = right;
+    return &expr->base;
 }
 
-Expr* expr_cast(Typespec* type, Expr* expr) {
-    Expr* e = new_expr(EXPR_CAST);
-    e->cast.type = type;
-    e->cast.expr = expr;
-    return e;
+Expr* expr_ternary(Arena* arena, Expr* condition, Expr* then_expr, Expr* else_expr)
+{
+    Ternary_Expr* expr = EXPR_ALLOC(arena, Ternary_Expr, EXPR_TERNARY);
+    expr->condition  = condition;
+    expr->then_expr  = then_expr;
+    expr->else_expr  = else_expr;
+    return &expr->base;
 }
 
-Expr* expr_index(Expr* expr, Expr* index) {
-    Expr* e = new_expr(EXPR_INDEX);
-    e->index.expr  = expr;
-    e->index.index = index;
-    return e;
+Expr* expr_cast(Arena* arena, Expr* type_expr, Expr* value_expr)
+{
+    Cast_Expr* expr = EXPR_ALLOC(arena, Cast_Expr, EXPR_CAST);
+    expr->type_expr  = type_expr;
+    expr->value_expr = value_expr;
+    return &expr->base;
 }
 
-Expr* expr_compound(Typespec* type, Compound_Initializer* initializers, int initializer_count) {
-    Expr* expr = new_expr(EXPR_COMPOUND);
-    expr->compound.type              = type;
-    expr->compound.initalizers       = AST_DUP(initializers, initializer_count);
-    expr->compound.initializer_count = initializer_count;
-    return expr;
+Expr* expr_index(Arena* arena, Expr* arr_expr, Expr* index)
+{
+    Index_Expr* expr = EXPR_ALLOC(arena, Index_Expr, EXPR_INDEX);
+    expr->expr  = arr_expr;
+    expr->index = index;
+    return &expr->base;
 }
 
-Expr* expr_decl(Decl* decl) {
-    Expr* expr = new_expr(EXPR_DECL);
-    expr->decl = decl;
-    return expr;
+Expr* expr_sizeof(Arena* arena, Expr* e)
+{
+    Type_Operator_Expr* expr = EXPR_ALLOC(arena, Type_Operator_Expr, EXPR_SIZEOF);
+    expr->expr = e;
+    return &expr->base;
 }
 
-Expr* expr_sizeof_expr(Expr* expr) {
-    Expr* e = new_expr(EXPR_SIZEOF_EXPR);
-    e->sizeof_expr = expr;
-    return e;
+Expr* expr_alignof(Arena* arena, Expr* e)
+{
+    Type_Operator_Expr* expr = EXPR_ALLOC(arena, Type_Operator_Expr, EXPR_ALIGNOF);
+    expr->expr = e;
+    return &expr->base;
 }
 
-Expr* expr_sizeof_type(Typespec* type) {
-    Expr* e = new_expr(EXPR_SIZEOF_TYPE);
-    e->sizeof_type = type;
-    return e;
+Expr* expr_typeof(Arena* arena, Expr* e)
+{
+    Type_Operator_Expr* expr = EXPR_ALLOC(arena, Type_Operator_Expr, EXPR_TYPEOF);
+    expr->expr = e;
+    return &expr->base;
 }
 
-Expr* expr_alignof_expr(Expr* expr) {
-    Expr* e = new_expr(EXPR_ALIGNOF_EXPR);
-    e->alignof_expr = expr;
-    return e;
+Expr* expr_pointer_type(Arena* arena, Expr* pointed_type)
+{
+    Pointer_Type_Expr* expr = EXPR_ALLOC(arena, Pointer_Type_Expr, EXPR_POINTER_TYPE);
+    expr->pointed_type = pointed_type;
+    return &expr->base;
 }
 
-Expr* expr_alignof_type(Typespec* type) {
-    Expr* e = new_expr(EXPR_ALIGNOF_TYPE);
-    e->alignof_type = type;
-    return e;
+Expr* expr_array_type(Arena* arena, Expr* element_type, Expr* size_expr)
+{
+    Array_Type_Expr* expr = EXPR_ALLOC(arena, Array_Type_Expr, EXPR_ARRAY_TYPE);
+    expr->element_type  = element_type;
+    expr->size_expr     = size_expr;
+    return &expr->base;
 }
 
-//
-// Print functions
-//
-
-void print_stmt(Stmt* stmt, int indent) {
-    ASSERT(stmt);
-    printf("%*s", indent, "");
-
-    switch (stmt->kind) {
-        case STMT_NONE: ASSERT_ALWAYS("STMT_NONE"); break;
-
-        case STMT_ASSIGN:
-            printf("(%s ", token_kind_to_string(stmt->assignment.op));
-            print_expr(stmt->assignment.left, 0);
-            print_expr(stmt->assignment.right, 0);
-            printf(")");
-            break;
-
-        case STMT_DECL_VAR:
-        case STMT_DECL_CONST:
-            if (stmt->kind == STMT_DECL_VAR) {
-                printf("(var ");
-            } else {
-                printf("(const ");
-            }
-            print_expr(stmt->decl.left, 0);
-            if (stmt->decl.type) {
-                printf(" :");
-                print_typespec(stmt->decl.type, 0);
-            }
-            if (stmt->decl.right) {
-                printf(" ");
-                print_expr(stmt->decl.right, 0);
-            }
-            printf(")");
-            break;
-
-        case STMT_EXPR:
-            print_expr(stmt->expr, 0);
-            break;
-
-        case STMT_RETURN:
-            printf("(return");
-            if (stmt->expr) {
-                print_expr(stmt->expr, 1);
-            }
-            printf(")");
-            break;
-
-        case STMT_BREAK:
-            if (stmt->control.label.len > 0) {
-                printf("(break %.*s)", stmt->control.label.len, stmt->control.label.data);
-            } else {
-                printf("(break)");
-            }
-            break;
-
-        case STMT_CONTINUE:
-            if (stmt->control.label.len > 0) {
-                printf("(continue %.*s)", stmt->control.label.len, stmt->control.label.data);
-            } else {
-                printf("(continue)");
-            }
-            break;
-
-        case STMT_BLOCK:
-            printf("(block\n");
-            for (int i = 0; i < stmt->block.stmt_count; i++) {
-                if (i != 0) { printf("\n"); }
-                print_stmt(stmt->block.stmts[i], indent + 2);
-            }
-            printf(")");
-            break;
-
-        case STMT_IF:
-            printf("(if ");
-            print_expr(stmt->if_stmt.condition, 0);
-            printf("\n");
-            print_stmt(stmt->if_stmt.then_branch, indent + 4);
-            if (stmt->if_stmt.else_branch) {
-                printf("\n%*selse\n", indent + 2, "");
-                print_stmt(stmt->if_stmt.else_branch, indent + 4);
-            }
-            printf("\n%*s)", indent, "");
-            break;
-
-        case STMT_WHILE:
-            printf("(while ");
-            print_expr(stmt->while_stmt.condition, 0);
-            printf("\n");
-            print_stmt(stmt->while_stmt.body, indent + 2);
-            printf("%*s)", indent, "");
-            break;
-
-        case STMT_DO:
-            printf("(do\n");
-            print_stmt(stmt->while_stmt.body, indent + 4);
-            printf("\n%*swhile ", indent + 2, "");
-            print_expr(stmt->while_stmt.condition, 0);
-            printf("%*s)", indent, "");
-            break;
-
-        case STMT_SWITCH:
-            printf("(switch\n");
-            for (int i = 0; i < stmt->switch_stmt.case_count; i++) {
-                Case_Branch* branch = stmt->switch_stmt.cases[i];
-                printf("%*scase ", indent + 2, "");
-                for (int j = 0; j < branch->value_count; j++) {
-                    if (j != 0) {
-                        printf(", ");
-                    }
-                    print_expr(branch->values[j], 0);
-                }
-                printf(":\n");
-                print_stmt(branch->body, indent + 4);
-                printf("\n");
-            }
-            if (stmt->switch_stmt.default_case) {
-                printf("%*sdefault:\n", indent + 2, "");
-                print_stmt(stmt->switch_stmt.default_case, indent + 4);
-                printf("\n");
-            }
-            printf("%*s)", indent, "");
-            break;
-
-        default: ASSERT_ALWAYS("Unknown Stmt_Kind"); break;
-    }
+Expr* expr_function(Arena* arena, Expr** param_types, int param_count, Expr* return_type, Stmt* body)
+{
+    Function_Expr* expr = EXPR_ALLOC(arena, Function_Expr, EXPR_FUNCTION);
+    expr->param_types = arena_dup_array(arena, param_types, param_count);
+    expr->param_count = param_count;
+    expr->return_type = return_type;
+    expr->body        = body;
+    return &expr->base;
 }
 
-void print_typespec(Typespec* type, int indent) {
-    ASSERT(type);
-    printf("%*s", indent, "");
-    switch (type->kind) {
-        case TYPESPEC_NONE: ASSERT_ALWAYS("TYPESPEC_NONE"); break;
-        case TYPESPEC_NAME:
-            printf("%s", type->name);
-            break;
-
-        case TYPESPEC_ARRAY:
-            printf("[");
-            if (type->array.size) {
-                print_expr(type->array.size, 0);
-            }
-            printf("]");
-            if (type->array.is_const) {
-                printf(" const ");
-            }
-            print_typespec(type->array.base, 0);
-            break;
-
-        case TYPESPEC_POINTER:
-            printf("*");
-            if (type->pointer.is_const) {
-                printf(" const ");
-            }
-            print_typespec(type->pointer.base, 0);
-            break;
-
-        case TYPESPEC_PROC:
-            printf("(proc-type");
-            for (int i = 0; i < type->proc.param_count; i++) {
-                if (i != 0) {
-                    printf(", ");
-                }
-                print_typespec(type->proc.params[i], 0);
-            }
-            if (type->proc.return_type) {
-                printf(" -> ");
-                print_typespec(type->proc.return_type, 0);
-            }
-            printf(")");
-            break;
-
-    }
+Expr* expr_struct(Arena* arena, Stmt** members, int member_count)
+{
+    Aggregate_Type_Expr* expr = EXPR_ALLOC(arena, Aggregate_Type_Expr, EXPR_AGGREGATE_STRUCT);
+    expr->members      = arena_dup_array(arena, members, member_count);
+    expr->member_count = member_count;
+    return &expr->base;
 }
 
-static void print_aggregate_item(Aggregate_Item* item, int indent) {
-    ASSERT(item);
-    printf("%*s", indent, "");
-    for (int j = 0; j < item->names_count; j++) {
-        if (j != 0) {
-            printf(", ");
-        }
-        printf("%.*s", item->names[j].len, item->names[j].data);
-    }
-    printf(": ");
-    if (item->type)
-        print_typespec(item->type, 0);
-    if (item->default_value) {
-        if (item->type) {
-            printf(" = ");
-        } else {
-            printf(":= ");
-        }
-        print_expr(item->default_value, 0);
-    }
+Expr* expr_union(Arena* arena, Stmt** members, int member_count)
+{
+    Aggregate_Type_Expr* expr = EXPR_ALLOC(arena, Aggregate_Type_Expr, EXPR_AGGREGATE_UNION);
+    expr->members      = arena_dup_array(arena, members, member_count);
+    expr->member_count = member_count;
+    return &expr->base;
 }
 
-void print_decl(Decl* decl, int indent) {
-    ASSERT(decl);
-    printf("%*s", indent, "");
-    switch (decl->kind) {
-        case DECL_NONE: ASSERT_ALWAYS("DECL_NONE"); break;
-
-        case DECL_ENUM: {
-            printf("(enum\n");
-            for (int i = 0; i < decl->enum_decl.item_count; i++) {
-                if (i != 0) { printf("\n"); }
-                Enum_Item* item = &decl->enum_decl.items[i];
-                printf("%*s%.*s", indent + 2, "", item->name.len, item->name.data);
-                if (item->value) {
-                    printf(" = ");
-                    print_expr(item->value, 0);
-                }
-            }
-            for (int i = 0; i < decl->enum_decl.method_count; i++) {
-                if (i != 0 || decl->enum_decl.item_count == 0) { printf("\n"); }
-                print_decl((Decl*)&decl->enum_decl.methods[i], indent + 2);
-            }
-            printf(")");
-
-        } break;
-
-        case DECL_STRUCT:
-        case DECL_UNION: {
-            const char* kind_str = decl->kind == DECL_STRUCT ? "struct" : "union";
-            printf("(%s\n", kind_str);
-            for (int i = 0; i < decl->aggregate_decl.item_count; i++) {
-                if (i != 0) { printf("\n"); }
-                print_aggregate_item(&decl->aggregate_decl.items[i], indent + 2);
-            }
-            for (int i = 0; i < decl->aggregate_decl.method_count; i++) {
-                if (i != 0 || decl->aggregate_decl.item_count == 0) { printf("\n"); }
-                print_decl((Decl*)&decl->aggregate_decl.methods[i], indent + 2);
-            }
-            printf(")");
-        } break;
-
-        case DECL_PROC: {
-            printf("(proc (");
-            for (int i = 0; i < decl->proc_decl.arg_count; i++) {
-                if (i != 0) { printf(", "); }
-                print_aggregate_item(&decl->proc_decl.args[i], 0);
-            }
-            printf(")");
-            if (decl->proc_decl.return_type) {
-                printf(" -> ");
-                print_typespec(decl->proc_decl.return_type, 0);
-            }
-            if (decl->proc_decl.body) {
-                printf("\n");
-                print_stmt(decl->proc_decl.body, indent + 2);
-            }
-            printf(")");
-        } break;
-    }
+Expr* expr_enum(Arena* arena, Enum_Item* items, int item_count, Function_Expr* methods, int method_count)
+{
+    Enum_Expr* expr = EXPR_ALLOC(arena, Enum_Expr, EXPR_ENUM);
+    expr->items        = arena_dup_array(arena, items, item_count);
+    expr->item_count   = item_count;
+    expr->methods      = methods;
+    expr->method_count = method_count;
+    return &expr->base;
 }
 
-void print_expr(Expr* expr, int indent) {
+void expr_print(Expr* expr, int indent) {
     ASSERT(expr);
     printf("%*s", indent, "");
     switch (expr->kind) {
-        case EXPR_NONE:
-            ASSERT_ALWAYS("EXPR_NONE");
-            break;
-
-        case EXPR_LIST:
-            printf("(list");
-            for (int i = 0; i < expr->list.expr_count; i++) {
-                printf(" ");
-                print_expr(expr->list.exprs[i], 0);
+        case EXPR_LIST: {
+            List_Expr* e = (List_Expr*)expr;
+            printf("'(");
+            for (int i = 0; i < e->expr_count; i++) {
+                if (i != 0) { printf(" "); }
+                expr_print(e->exprs[i], 0);
             }
             printf(")");
-            break;
+        } break;
 
-        case EXPR_INT:
-            printf("%llu", expr->ivalue);
-            break;
+        case EXPR_INT: {
+            Int_Expr* e = (Int_Expr*)expr;
+            printf("%llu", e->value);
+        } break;
 
-        case EXPR_BOOL:
-            printf(expr->bvalue ? "true" : "false");
-            break;
+        case EXPR_FLOAT: {
+            Float_Expr* e = (Float_Expr*)expr;
+            printf("%f", e->value);
+        } break;
 
-        case EXPR_NULL:
+        case EXPR_BOOL: {
+            Bool_Expr* e = (Bool_Expr*)expr;
+            printf("%s", e->value ? "true" : "false");
+        } break;
+
+        case EXPR_NULL: {
             printf("null");
-            break;
+        } break;
 
-        case EXPR_FLT:
-            printf("%f", expr->fvalue);
-            break;
+        case EXPR_STRING: {
+            String_Expr* e = (String_Expr*)expr;
+            printf("\"%.*s\"", STR_FMT(e->value));
+        } break;
 
-        case EXPR_STR:
-            // @TODO: Escape special characters
-            printf("\"%s\"", expr->svalue);
-            break;
+        case EXPR_NAME: {
+            Name_Expr* e = (Name_Expr*)expr;
+            printf("%.*s", STR_FMT(e->name));
+        } break;
 
-        case EXPR_NAME:
-            printf("%s", expr->name);
-            break;
-
-        case EXPR_CALL:
-            printf("(%s", expr->call.name);
-            for (int i = 0; expr->call.args && i < expr->call.arg_count; i++) {
+        case EXPR_CALL: {
+            Call_Expr* e = (Call_Expr*)expr;
+            printf("(%.*s", STR_FMT(e->name));
+            for (int i = 0; i < e->arg_count; i++) {
                 printf(" ");
-                print_expr(expr->call.args[i], 0);
+                expr_print(e->args[i], 0);
             }
             printf(")");
-            break;
+        } break;
 
-        case EXPR_UNARY:
-            printf("(%s ", token_kind_to_string(expr->unary.op));
-            print_expr(expr->unary.operand, 0);
+        case EXPR_UNARY: {
+            Unary_Expr* e = (Unary_Expr*)expr;
+            printf("(%s ", token_kind_to_string(e->op));
+            expr_print(e->operand, 0);
             printf(")");
-            break;
+        } break;
 
-        case EXPR_BINARY:
-            printf("(%s ", token_kind_to_string(expr->binary.op));
-            print_expr(expr->binary.left, 0);
+        case EXPR_BINARY: {
+            Binary_Expr* e = (Binary_Expr*)expr;
+            printf("(%s ", token_kind_to_string(e->op));
+            expr_print(e->left, 0);
             printf(" ");
-            print_expr(expr->binary.right, 0);
+            expr_print(e->right, 0);
             printf(")");
-            break;
+        } break;
 
-        case EXPR_TERNARY:
+        case EXPR_TERNARY: {
+            Ternary_Expr* e = (Ternary_Expr*)expr;
             printf("(?: ");
-            print_expr(expr->ternary.condition, 0);
+            expr_print(e->condition, 0);
             printf(" ");
-            print_expr(expr->ternary.then_expr, 0);
+            expr_print(e->then_expr, 0);
             printf(" ");
-            print_expr(expr->ternary.else_expr, 0);
+            expr_print(e->else_expr, 0);
             printf(")");
-            break;
+        } break;
 
-        case EXPR_CAST:
-            printf("((cast ");
-            print_typespec(expr->cast.type, 0);
+        case EXPR_CAST: {
+            Cast_Expr* e = (Cast_Expr*)expr;
+            printf("(cast ");
+            expr_print(e->type_expr, 0);
             printf(" ");
-            print_expr(expr->cast.expr, 0);
+            expr_print(e->value_expr, 0);
             printf(")");
-            break;
+        } break;
 
-        case EXPR_DECL:
-            print_decl(expr->decl, 0);
-            break;
-
-        case EXPR_SIZEOF_EXPR:
-            printf("(sizeof_expr ");
-            print_expr(expr->sizeof_expr, 0);
+        case EXPR_INDEX: {
+            Index_Expr* e = (Index_Expr*)expr;
+            printf("([] ");
+            expr_print(e->expr, 0);
+            printf(" ");
+            expr_print(e->index, 0);
             printf(")");
-            break;
+        } break;
 
-        case EXPR_SIZEOF_TYPE:
-            printf("(sizeof_type ");
-            print_typespec(expr->sizeof_type, 0);
+        case EXPR_SIZEOF:
+        case EXPR_ALIGNOF:
+        case EXPR_TYPEOF: {
+            Type_Operator_Expr* e = (Type_Operator_Expr*)expr;
+            const char* op_str = expr->kind == EXPR_SIZEOF ? "sizeof" :
+                                 expr->kind == EXPR_ALIGNOF ? "alignof" : "typeof";
+            printf("(%s ", op_str);
+            expr_print(e->expr, 0);
             printf(")");
-            break;
+        } break;
 
-        case EXPR_ALIGNOF_EXPR:
-            printf("(alignof_expr ");
-            print_expr(expr->alignof_expr, 0);
+        case EXPR_POINTER_TYPE: {
+            Pointer_Type_Expr* e = (Pointer_Type_Expr*)expr;
+            printf("(ptr ");
+            expr_print(e->pointed_type, 0);
             printf(")");
-            break;
+        } break;
 
-        case EXPR_ALIGNOF_TYPE:
-            printf("(alignof_type ");
-            print_typespec(expr->alignof_type, 0);
+        case EXPR_ARRAY_TYPE: {
+            Array_Type_Expr* e = (Array_Type_Expr*)expr;
+            printf("(array ");
+            expr_print(e->element_type, 0);
+            printf(" ");
+            expr_print(e->size_expr, 0);
             printf(")");
-            break;
+        } break;
 
-        default: ASSERT_ALWAYS("Unhandled expr kind %d", expr->kind); break;
+        case EXPR_FUNCTION: {
+            Function_Expr* e = (Function_Expr*)expr;
+            printf("(func");
+            for (int i = 0; i < e->param_count; i++) {
+                printf(" ");
+                expr_print(e->param_types[i], 0);
+            }
+            if (e->return_type) {
+                printf(" -> ");
+                expr_print(e->return_type, 0);
+            }
+            if (e->body) {
+                printf("\n");
+                stmt_print(e->body, indent + 2);
+                printf("\n%*s", indent, "");
+            }
+            printf(")");
+        } break;
+
+        case EXPR_AGGREGATE_STRUCT:
+        case EXPR_AGGREGATE_UNION: {
+            Aggregate_Type_Expr* e = (Aggregate_Type_Expr*)expr;
+            const char* agg_str = expr->kind == EXPR_AGGREGATE_STRUCT ? "struct" : "union";
+            printf("(%s\n", agg_str);
+            for (int i = 0; i < e->member_count; i++) {
+                printf("%*s", indent + 2, "");
+                stmt_print(e->members[i], indent + 2);
+                printf("\n");
+            }
+            printf("%*s)", indent, "");
+        } break;
+
+        case EXPR_ENUM: {
+            Enum_Expr* e = (Enum_Expr*)expr;
+            printf("(enum\n");
+            for (int i = 0; i < e->item_count; i++) {
+                Enum_Item* item = &e->items[i];
+                printf("%*s%.*s", indent + 2, "", STR_FMT(item->name));
+                if (item->value) {
+                    printf(" = ");
+                    expr_print(item->value, 0);
+                }
+                printf("\n");
+            }
+            for (int i = 0; i < e->method_count; i++) {
+                printf("%*s", indent + 2, "");
+                expr_print(&e->methods[i].base, indent + 2);
+                printf("\n");
+            }
+            printf("%*s)", indent, "");
+        } break;
+
+        default: ASSERT_ALWAYS("Unknown Expr_Kind"); break;
     }
 }
 
-//
-//
-//
-
-static void test_expr(void) {
+TEST(ast)
+{
+    Arena* arena = &(Arena){0};
     Expr* exprs[] = {
-        expr_int(123),
-        expr_flt(3.14),
-        expr_str("hello"),
-        expr_name("variable"),
-        expr_unary('-', expr_int(42)),
-        expr_binary('+', expr_int(1), expr_int(2)),
-        expr_ternary(
-            expr_binary(TOK_LTEQ, expr_name("x"), expr_int(10)),
-            expr_str("less than 10"),
-            expr_str("10 or more")),
-        expr_cast(new_typespec(TYPESPEC_NAME), expr_int(100)),
-        expr_call("my_function", &(Expr*[]){
-                expr_int(1),
-                expr_int(2),
-                expr_flt(3.0),
-                expr_str("test"),
-                expr_name("foo"),
+        expr_int(arena, 123),
+        expr_float(arena, 3.14),
+        expr_str(arena, str_from_cstr("hello")),
+        expr_name(arena, str_from_cstr("variable")),
+        expr_unary(arena, '-', expr_int(arena, 42)),
+        expr_binary(arena, '+', expr_int(arena, 1), expr_int(arena, 2)),
+        expr_ternary(arena,
+            expr_binary(arena, TOK_LTEQ, expr_name(arena, str_from_cstr("x")), expr_int(arena, 10)),
+            expr_str(arena, str_from_cstr("less than 10")),
+            expr_str(arena, str_from_cstr("10 or more"))),
+        expr_cast(arena, expr_pointer_type(arena, expr_name(arena, str_from_cstr("int"))), expr_int(arena, 100)),
+        expr_call(arena, str_from_cstr("my_function"), &(Expr*[]){
+                expr_int(arena, 1),
+                expr_int(arena, 2),
+                expr_float(arena, 3.0),
+                expr_str(arena, str_from_cstr("test")),
+                expr_name(arena, str_from_cstr("foo")),
             }[0], 5),
     };
 
     ASSERT(exprs[0]->kind == EXPR_INT, "Expected EXPR_INT, got %d", exprs[0]->kind);
-    ASSERT(exprs[0]->ivalue == 123, "Expected 123, got %llu", exprs[0]->ivalue);
-    ASSERT(exprs[1]->kind == EXPR_FLT, "Expected EXPR_FLOAT, got %d", exprs[1]->kind);
-    ASSERT(fabs(exprs[1]->fvalue - 3.14) < 0.000001, "Expected 3.14, got %f", exprs[1]->fvalue);
-    ASSERT(exprs[2]->kind == EXPR_STR, "Expected EXPR_STR, got %d", exprs[2]->kind);
-    ASSERT(strcmp(exprs[2]->svalue, "hello") == 0,
-        "Expected 'hello', got '%s'", exprs[2]->svalue);
+    Int_Expr* iexpr = (Int_Expr*)exprs[0];
+    ASSERT(iexpr->value = 123, "Expected 123, got %llu", iexpr->value);
+    ASSERT(exprs[1]->kind == EXPR_FLOAT, "Expected EXPR_FLOAT, got %d", exprs[1]->kind);
+    Float_Expr* fexpr = (Float_Expr*)exprs[1];
+    ASSERT(fabs(fexpr->value - 3.14) < 0.0001, "Expected 3.14, got %f", fexpr->value);
+    ASSERT(exprs[2]->kind == EXPR_STRING, "Expected EXPR_STR, got %d", exprs[2]->kind);
+    String_Expr* sexpr = (String_Expr*)exprs[2];
+    ASSERT(str_eq(sexpr->value, str_from_cstr("hello")), "Expected 'hello', got '%.*s'", STR_FMT(sexpr->value));
     ASSERT(exprs[3]->kind == EXPR_NAME, "Expected EXPR_NAME, got %d", exprs[3]->kind);
-    ASSERT(strcmp(exprs[3]->name, "variable") == 0,
-        "Expected 'variable', got '%s'", exprs[3]->name);
+    Name_Expr* nexpr = (Name_Expr*)exprs[3];
+    ASSERT(str_eq(nexpr->name, str_from_cstr("variable")), "Expected 'variable', got '%.*s'", STR_FMT(nexpr->name));
     ASSERT(exprs[4]->kind == EXPR_UNARY, "Expected EXPR_UNARY, got %d", exprs[4]->kind);
-    ASSERT(exprs[4]->unary.op == '-', "Expected TOK_SUB, got %d", exprs[4]->unary.op);
-    ASSERT(exprs[4]->unary.operand->kind == EXPR_INT,
-        "Expected EXPR_INT, got %d", exprs[4]->unary.operand->kind);
-    ASSERT(exprs[4]->unary.operand->ivalue == 42,
-        "Expected 42, got %llu", exprs[4]->unary.operand->ivalue);
+    Unary_Expr* uexpr = (Unary_Expr*)exprs[4];
+    ASSERT(uexpr->op == '-', "Expected TOK_SUB, got %d", uexpr->op);
+    ASSERT(uexpr->operand->kind == EXPR_INT, "Expected EXPR_INT, got %d", uexpr->operand->kind);
+    ASSERT(((Int_Expr*)uexpr->operand)->value == 42, "Expected 42, got %llu", ((Int_Expr*)uexpr->operand)->value);
 
     printf("Expressions:\n");
     for (size_t i = 0; i < COUNTOF(exprs); i++) {
-        print_expr(exprs[i], 2);
+        expr_print(exprs[i], 2);
         printf("\n");
     }
-}
 
-static void test_typespec(void) {
-    Typespec* types[] = {
-        typespec_name("s32"),
-        typespec_pointer(typespec_name("u8"), false),
-        typespec_array(typespec_name("f32"), expr_int(10), true),
-        typespec_proc(
-            (Typespec*[]){
-                typespec_name("s32"),
-                typespec_pointer(typespec_name("u8"), true),
-            },
-            2,
-            NULL),
-        typespec_proc(
-            (Typespec*[]){ typespec_name("Param_Type"), },
-            1,
-            typespec_name("bool")),
-    };
-
-    ASSERT(types[0]->kind == TYPESPEC_NAME, "Expected TYPESPEC_NAME, got %d", types[0]->kind);
-    ASSERT(strcmp(types[0]->name, "s32") == 0, "Expected 's32', got '%s'", types[0]->name);
-    ASSERT(types[1]->kind == TYPESPEC_POINTER, "Expected TYPESPEC_POINTER, got %d", types[1]->kind);
-    ASSERT(types[1]->pointer.base->kind == TYPESPEC_NAME, "Expected TYPESPEC_NAME, got %d", types[1]->pointer.base->kind);
-    ASSERT(strcmp(types[1]->pointer.base->name, "u8") == 0, "Expected 'u8', got '%s'", types[1]->pointer.base->name);
-    ASSERT(types[1]->pointer.is_const == false, "Expected is_const false, got true");
-    ASSERT(types[2]->kind == TYPESPEC_ARRAY, "Expected TYPESPEC_ARRAY, got %d", types[2]->kind);
-    ASSERT(types[2]->array.base->kind == TYPESPEC_NAME, "Expected TYPESPEC_NAME, got %d", types[2]->array.base->kind);
-    ASSERT(strcmp(types[2]->array.base->name, "f32") == 0, "Expected 'f32', got '%s'", types[2]->array.base->name);
-    ASSERT(types[2]->array.size->kind == EXPR_INT, "Expected EXPR_INT, got %d", types[2]->array.size->kind);
-    ASSERT(types[2]->array.size->ivalue == 10, "Expected size 10, got %llu", types[2]->array.size->ivalue);
-    ASSERT(types[3]->kind == TYPESPEC_PROC, "Expected TYPESPEC_PROC, got %d", types[3]->kind);
-    ASSERT(types[3]->proc.param_count == 2, "Expected 2 params, got %d", types[3]->proc.param_count);
-    ASSERT(types[3]->proc.params[0]->kind == TYPESPEC_NAME, "Expected TYPESPEC_NAME, got %d", types[3]->proc.params[0]->kind);
-    ASSERT(strcmp(types[3]->proc.params[0]->name, "s32") == 0, "Expected 's32', got '%s'", types[3]->proc.params[0]->name);
-    ASSERT(types[3]->proc.params[1]->kind == TYPESPEC_POINTER, "Expected TYPESPEC_POINTER, got %d",
-        types[3]->proc.params[1]->kind);
-    ASSERT(types[3]->proc.params[1]->pointer.base->kind == TYPESPEC_NAME,
-        "Expected TYPESPEC_NAME, got %d", types[3]->proc.params[1]->pointer.base->kind);
-    ASSERT(strcmp(types[3]->proc.params[1]->pointer.base->name, "u8") == 0,
-        "Expected 'u8', got '%s'", types[3]->proc.params[1]->pointer.base->name);
-    ASSERT(types[4]->kind == TYPESPEC_PROC, "Expected TYPESPEC_PROC, got %d", types[4]->kind);
-    ASSERT(types[4]->proc.param_count == 1, "Expected 1 param, got %d", types[4]->proc.param_count);
-    ASSERT(types[4]->proc.params[0]->kind == TYPESPEC_NAME,
-        "Expected TYPESPEC_NAME, got %d", types[4]->proc.params[0]->kind);
-    ASSERT(strcmp(types[4]->proc.params[0]->name, "Param_Type") == 0,
-        "Expected 'Param_Type', got '%s'", types[4]->proc.params[0]->name);
-    ASSERT(types[4]->proc.return_type->kind == TYPESPEC_NAME,
-        "Expected TYPESPEC_NAME, got %d", types[4]->proc.return_type->kind);
-    ASSERT(strcmp(types[4]->proc.return_type->name, "bool") == 0,
-        "Expected 'bool', got '%s'", types[4]->proc.return_type->name);
-
-    printf("\nTypespecs:\n");
-    for (size_t i = 0; i < COUNTOF(types); i++) {
-        print_typespec(types[i], 2);
-        printf("\n");
-    }
-}
-
-TEST(ast) {
-    Arena test_arena = {0};
-    ast_set_arena(&test_arena);
-    test_expr();
-    test_typespec();
-    arena_reset(&test_arena);
+    arena_reset(arena);
 }
 

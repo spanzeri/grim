@@ -7,14 +7,16 @@
 #include "lex.h"
 #include "ast.h"
 #include "parse.h"
-#include "sema.h"
+// #include "sema.h"
+// #include "resolve.h"
 
 int main(int argc, char *argv[]) {
     // DO_TEST(common);
     // DO_TEST(lex);
-    // DO_TEST(ast);
+    DO_TEST(ast);
     DO_TEST(parse);
-    DO_TEST(sema);
+    // DO_TEST(sema);
+    // DO_TEST(resolve);
 }
 
 #include "common.c"
@@ -22,4 +24,5 @@ int main(int argc, char *argv[]) {
 #include "lex.c"
 #include "ast.c"
 #include "parse.c"
-#include "sema.c"
+// #include "sema.c"
+// #include "resolve.c"

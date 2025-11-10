@@ -9,14 +9,13 @@
 
 typedef enum Keyword {
     KW_NONE = 0,
-    KW_PROC,
+    KW_FN,
     KW_RETURN,
     KW_IF,
     KW_ELSE,
-    KW_WHILE,
     KW_FOR,
-    KW_DO,
     KW_SWITCH,
+    KW_CASE,
     KW_BREAK,
     KW_CONTINUE,
     KW_CONST,
@@ -32,7 +31,8 @@ typedef enum Keyword {
 } Keyword;
 
 typedef enum Token_Kind {
-    TOK_EOF = 0,
+    TOK_INVALID = 0,
+    TOK_EOF,
     TOK_KEYWORD,
     FIRST_CHAR_TOKEN = 32,
     TOK_PLUS = '+',
@@ -105,9 +105,9 @@ typedef struct Token {
     union {
         u64         ivalue;
         double      fvalue;
-        const char *name;
+        String      name;
         u32         cvalue; // We don't yet support multi-byte, but make it large enough for UTF-32
-        char *      svalue; // Array, needs to be freed
+        String      svalue;
         Keyword     keyword;
     };
 } Token;
