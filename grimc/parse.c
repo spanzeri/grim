@@ -21,6 +21,7 @@ static Stmt*    parse_break_stmt(Parser* p);
 static Stmt*    parse_continue_stmt(Parser* p);
 
 static Expr*    parse_expr(Parser* p);
+static Expr*    parse_single_expr(Parser* p);
 
 Parser parser_init(String source, const char* filepath)
 {
@@ -483,6 +484,7 @@ typedef enum {
     PREC_ADD,
     PREC_MUL,
     PREC_UNARY,
+    PREC_DOT,
     PREC_CALL,
     PREC_PRIMARY,
 } Precedence;
@@ -517,8 +519,8 @@ static int get_precedence(Token_Kind kind)
         case '/':       return PREC_MUL;
         case '%':       return PREC_MUL;
 
+        case '.':       return PREC_DOT;
         case '(':       return PREC_CALL;
-        case '.':       return PREC_CALL;
     }
 
     return PREC_NONE;
@@ -529,11 +531,13 @@ static Expr* parse_prefix_expr(Parser* p);
 static Expr* parse_primary_expr(Parser* p);
 static Expr* parse_struct_expr(Parser* p);
 static Expr* parse_union_expr(Parser* p);
+static Expr* parse_enum_expr(Parser* p);
+static Expr* parse_function_expr(Parser* p);
 
-static Expr* parse_expr(Parser* p)
+static Expr* parse_expr_internal(Parser* p, bool allow_lists)
 {
     Expr* expr = parse_expr_with_precedence(p, 0);
-    if (!match(p, ',')) {
+    if (!match(p, ',') || !allow_lists) {
         return expr;
     }
 
@@ -550,6 +554,16 @@ static Expr* parse_expr(Parser* p)
     return expr;
 }
 
+static Expr* parse_expr(Parser* p)
+{
+    return parse_expr_internal(p, true);
+}
+
+static Expr* parse_single_expr(Parser* p)
+{
+    return parse_expr_internal(p, false);
+}
+
 static Expr* parse_expr_with_precedence(Parser* p, int precedence)
 {
     Expr* left = parse_prefix_expr(p);
@@ -560,6 +574,13 @@ static Expr* parse_expr_with_precedence(Parser* p, int precedence)
             p->current.kind == TOK_VAR_ASSIGN || p->current.kind == TOK_CONST_ASSIGN)
         {
             break;
+        }
+
+        if (p->current.kind == '(') {
+            // Function call
+            advance(p); // Consume '('
+            for (;;) {
+            }
         }
 
         int curr_precedence = get_precedence(p->current.kind);
@@ -580,6 +601,20 @@ static Expr* parse_expr_with_precedence(Parser* p, int precedence)
     return left;
 }
 
+static Expr* parse_grouping_expr(Parser* p)
+{
+    consume(p, '(', "Expected '(' at start of grouping expression");
+    Expr* expr = parse_expr(p);
+    if (!expr) {
+        syntax_error("Expected expression after '('");
+        return NULL;
+    }
+    if (!consume(p, ')', "Expected ')' after expression")) {
+        return NULL;
+    }
+    return expr;
+}
+
 static Expr* parse_prefix_expr(Parser* p)
 {
     switch (p->current.kind) {
@@ -596,18 +631,7 @@ static Expr* parse_prefix_expr(Parser* p)
             return parse_primary_expr(p);
         } break;
 
-        case '(': {
-            advance(p);
-            Expr* expr = parse_expr(p);
-            if (!expr) {
-                syntax_error("Expected expression after '('");
-                return NULL;
-            }
-            if (!consume(p, ')', "Expected ')' after expression")) {
-                return NULL;
-            }
-            return expr;
-        } break;
+        case '(': return parse_grouping_expr(p); break;
 
         case '+':
         case '-':
@@ -655,6 +679,8 @@ static Expr* parse_primary_expr(Parser* p)
                 case KW_NULL:       expr = expr_null(&p->ast_arena);        advance(p); break;
                 case KW_STRUCT:     expr = parse_struct_expr(p);    break;
                 case KW_UNION:      expr = parse_union_expr(p);     break;
+                case KW_ENUM:       expr = parse_enum_expr(p);      break;
+                case KW_FN:         expr = parse_function_expr(p);  break;
 
                 default:
                     syntax_error("Unexpected keyword `%s` in expression", keyword_to_string(p->current.keyword));
@@ -705,6 +731,144 @@ static Expr* parse_struct_expr(Parser* p)
 static Expr* parse_union_expr(Parser* p)
 {
     return parse_aggreagate_expr(p, KW_UNION, expr_union);
+}
+
+static Expr* parse_enum_expr(Parser* p)
+{
+    if (!match_keyword(p, KW_ENUM)) {
+        ASSERT_ALWAYS("parse_enum_expr called but no 'enum' keyword found");
+        return NULL;
+    }
+
+    consume(p, '{', "Expected '{' after 'enum'");
+    Enum_Item* enumerants = NULL;
+    Stmt** members = NULL;
+
+    for (;;) {
+        if (match(p, '}')) { break; }
+        if (p->current.kind != TOK_IDENTIFIER) {
+            syntax_error("Expected identifier in enum declaration");
+            darray_free(members);
+            return NULL;
+        }
+
+        if (peek(p, 1).kind == '=' || peek(p, 1).kind == ',') {
+            // Simple enum member
+            String member_name = dup_string(&p->string_arena, p->current.svalue);
+            advance(p);
+            Expr* value_expr = NULL;
+            if (match(p, '=')) {
+                value_expr = parse_single_expr(p);
+                if (!value_expr) {
+                    syntax_error("Expected expression after '=' in enum member");
+                    darray_free(members);
+                    return NULL;
+                }
+            }
+            match(p, ',');
+            darray_add(enumerants, (Enum_Item){
+                .name  = member_name,
+                .value = value_expr,
+            });
+        }
+        else {
+            // Statement for a member
+            Stmt* member_stmt = parse_expr_stmt(p);
+            if (!member_stmt) {
+                syntax_error("Expected enum member declaration");
+                darray_free(members);
+                return NULL;
+            }
+            darray_add(members, member_stmt);
+            continue;
+        }
+    }
+
+    Expr* expr = expr_enum(&p->ast_arena, enumerants, darray_len(enumerants), members, darray_len(members));
+    darray_free(enumerants);
+    darray_free(members);
+    return expr;
+}
+
+static Expr* parse_function_expr(Parser* p)
+{
+    if (!match_keyword(p, KW_FN)) {
+        ASSERT_ALWAYS("parse_function_expr called but no 'fn' keyword found");
+        return NULL;
+    }
+
+    consume(p, '(', "Expected '(' after 'fn'");
+
+    // Parse parameters
+    Function_Param* params = NULL;
+    for (;;) {
+        if (match(p, ')')) { break; }
+        if (p->current.kind != TOK_IDENTIFIER) {
+            syntax_error("Expected parameter name in function declaration");
+            darray_free(params);
+            return NULL;
+        }
+        String param_name = dup_string(&p->string_arena, p->current.svalue);
+        advance(p);
+        if (!consume(p, ':', "Expected ':' after parameter name")) {
+            darray_free(params);
+            return NULL;
+        }
+        Expr* param_type = parse_single_expr(p);
+        if (!param_type) {
+            syntax_error("Expected parameter type in function declaration");
+            darray_free(params);
+            return NULL;
+        }
+        Expr* default_value = NULL;
+        if (match(p, '=')) {
+            default_value = parse_single_expr(p);
+            if (!default_value) {
+                syntax_error("Expected default value expression in function parameter");
+                darray_free(params);
+                return NULL;
+            }
+        }
+        darray_add(params, (Function_Param){
+            .name          = param_name,
+            .type          = param_type,
+            .default_value = default_value,
+        });
+        if (!match(p, ',')) {
+            consume(p, ')', "Expected ')' after function parameters");
+            break;
+        }
+    }
+
+    // Parse return type
+    Expr* return_type = NULL;
+    if (!match(p, '{')) {
+        return_type = parse_single_expr(p);
+        if (!return_type) {
+            syntax_error("Expected return type or '{' after function parameters");
+            darray_free(params);
+            return NULL;
+        }
+    }
+
+    // Parse function body
+    consume(p, '{', "Expected '{' at start of function body");
+    Stmt** body_stmts = NULL;
+    while (!parser_is_at_end(p) && p->current.kind != '}') {
+        Stmt* body_stmt = parse_stmt(p);
+        if (!body_stmt) {
+            syntax_error("Expected statement in function body");
+            darray_free(params);
+            darray_free(body_stmts);
+            return NULL;
+        }
+    }
+    consume(p, '}', "Expected '}' at end of function body");
+    Stmt* body = stmt_block(&p->ast_arena, body_stmts, darray_len(body_stmts), (String){0});
+    darray_free(body_stmts);
+    Expr* expr = expr_function(&p->ast_arena, params, darray_len(params), return_type, body);
+    darray_free(params);
+    return expr;
 }
 
 //
@@ -770,6 +934,7 @@ static void parse_complex_code(void)
 
 TEST(parse)
 {
+    break_on_syntax_error = true;
 
     parse_and_print_decl(str_from_lit("struct { x, y: f32; }"));
     parse_and_print_decl(str_from_lit("struct {\n  x, y: f32;\n  s := \"hello\";\n}"));
@@ -778,7 +943,6 @@ TEST(parse)
     parse_and_print_decl(
         str_from_lit("fn(n: s32) s32 { trace(\"fact\"); if n <= 1 { return 1; } return n * fact(n - 1); }"));
 
-    break_on_syntax_error = true;
     parse_complex_code();
 }
 

@@ -1,0 +1,14 @@
+putchar :: foreign fn(c: i32) "stdlib"
+
+main :: fn() {
+    a, b :: 'a', 'b'
+    c := a + 2
+    putchar(a)
+    putchar(b)
+    putchar(c)
+}
+
+vec3 :: struct {
+    x, y, z: f32
+}
+

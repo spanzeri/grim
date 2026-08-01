@@ -395,10 +395,10 @@ Expr* expr_array_type(Arena* arena, Expr* element_type, Expr* size_expr)
     return &expr->base;
 }
 
-Expr* expr_function(Arena* arena, Expr** param_types, int param_count, Expr* return_type, Stmt* body)
+Expr* expr_function(Arena* arena, Function_Param* param, int param_count, Expr* return_type, Stmt* body)
 {
     Function_Expr* expr = EXPR_ALLOC(arena, Function_Expr, EXPR_FUNCTION);
-    expr->param_types = arena_dup_array(arena, param_types, param_count);
+    expr->params      = arena_dup_array(arena, param, param_count);
     expr->param_count = param_count;
     expr->return_type = return_type;
     expr->body        = body;
@@ -421,13 +421,13 @@ Expr* expr_union(Arena* arena, Stmt** members, int member_count)
     return &expr->base;
 }
 
-Expr* expr_enum(Arena* arena, Enum_Item* items, int item_count, Function_Expr* methods, int method_count)
+Expr* expr_enum(Arena* arena, Enum_Item* items, int item_count, Stmt** members, int member_count)
 {
     Enum_Expr* expr = EXPR_ALLOC(arena, Enum_Expr, EXPR_ENUM);
     expr->items        = arena_dup_array(arena, items, item_count);
     expr->item_count   = item_count;
-    expr->methods      = methods;
-    expr->method_count = method_count;
+    expr->members      = arena_dup_array(arena, members, member_count);
+    expr->member_count = member_count;
     return &expr->base;
 }
 
@@ -561,7 +561,16 @@ void expr_print(Expr* expr, int indent) {
             printf("(func");
             for (int i = 0; i < e->param_count; i++) {
                 printf(" ");
-                expr_print(e->param_types[i], 0);
+                printf("(");
+                if (e->params[i].default_value) {
+                    printf("(= %.*s ", STR_FMT(e->params[i].name));
+                    expr_print(e->params[i].default_value, 0);
+                    printf(")");
+                } else {
+                    printf("%.*s ", STR_FMT(e->params[i].name));
+                }
+                expr_print(e->params[i].type, 0);
+                printf(")");
             }
             if (e->return_type) {
                 printf(" -> ");
@@ -593,16 +602,19 @@ void expr_print(Expr* expr, int indent) {
             printf("(enum\n");
             for (int i = 0; i < e->item_count; i++) {
                 Enum_Item* item = &e->items[i];
-                printf("%*s%.*s", indent + 2, "", STR_FMT(item->name));
-                if (item->value) {
-                    printf(" = ");
+                if (!item->value) {
+                    printf("%*s%.*s", indent + 2, "", STR_FMT(item->name));
+                }
+                else {
+                    printf("%*s(= %.*s ", indent + 2, "", STR_FMT(item->name));
                     expr_print(item->value, 0);
+                    printf(")");
                 }
                 printf("\n");
             }
-            for (int i = 0; i < e->method_count; i++) {
+            for (int i = 0; i < e->member_count; i++) {
                 printf("%*s", indent + 2, "");
-                expr_print(&e->methods[i].base, indent + 2);
+                stmt_print(e->members[i], indent + 2);
                 printf("\n");
             }
             printf("%*s)", indent, "");

@@ -1,27 +1,13 @@
 CC := clang
 CFLAGS := \
-	-std=c11 \
-	-Werror -Wall \
-	-Wsign-compare \
-	-Wshadow \
-	-Wpointer-arith \
-	-Wstrict-prototypes \
-	-Wmissing-prototypes \
-	-Wmissing-declarations \
-	-Wredundant-decls \
-	-Wwrite-strings \
-	-Wformat=2 \
-	-Winit-self \
-	-Wundef \
-	-Wbad-function-cast \
-	-Wcast-qual \
-	-Wconversion \
-	-Wfloat-equal \
-	-Wuninitialized
+	-std=c23 \
+	-Werror -Wall -Wextra -Wmost -pedantic \
+	-Wno-unused-parameter
 
 LDFLAGS := -lm
 TARGET := bin/grimc
 SRCS := $(wildcard grimc/*.c) $(wildcard grimc/*.h) Makefile
+OBJS := $(SRCS:.c=.o)
 
 .PHONY: all clean debug release
 
@@ -36,16 +22,13 @@ release: $(TARGET)
 	@strip --strip-unneeded $(TARGET)
 	@echo "Release build complete: $(TARGET)"
 
-# Build the target
 $(TARGET): bin $(SRCS)
 	@echo "Compiling $(SRC)..."
 	$(CC) $(CFLAGS) grimc/grimc.c -o $@ $(LDFLAGS)
 
-# Create bin directory if it doesn't exist
 bin:
 	@mkdir -p bin
 
-# Clean build artifacts
 clean:
 	@echo "Cleaning build artifacts..."
 	@rm -rf bin

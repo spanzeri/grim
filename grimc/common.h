@@ -263,8 +263,14 @@ const char *str_intern      (const char *str);
 
 extern bool break_on_syntax_error;
 
+#define syntax_error(...)                               \
+    do {                                                \
+        syntax_error_impl(__VA_ARGS__);                 \
+        if (break_on_syntax_error) { DEBUGBREAK(); }    \
+    } while (0)
+
 PRINTF_LIKE(1, 2)
-void syntax_error(const char *fmt, ...);
+void syntax_error_impl(const char *fmt, ...);
 
 DECL_TEST(common);
 

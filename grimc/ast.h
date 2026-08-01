@@ -247,12 +247,19 @@ typedef struct Array_Type_Expr {
     Expr*       size_expr;
 } Array_Type_Expr;
 
+typedef struct Function_Param {
+    String      name;
+    Expr*       type;
+    Expr*       default_value;
+} Function_Param;
+
 typedef struct Function_Expr {
-    Expr        base;
-    Expr**      param_types;
-    int         param_count;
-    Expr*       return_type;
-    Stmt*       body;
+    Expr            base;
+    Function_Param* params;
+    int             param_count;
+    // @TODO: Named returns? Multiple returns?
+    Expr*           return_type;
+    Stmt*           body;
 } Function_Expr;
 
 
@@ -272,8 +279,8 @@ typedef struct Enum_Expr {
     Expr            base;
     Enum_Item*      items;
     int             item_count;
-    Function_Expr*  methods;
-    int             method_count;
+    Stmt**          members;
+    int             member_count;
 } Enum_Expr;
 
 Expr* expr_list         (Arena* arena, Expr** exprs, int expr_count);
@@ -294,10 +301,10 @@ Expr* expr_alignof      (Arena* arena, Expr* expr);
 Expr* expr_typeof       (Arena* arena, Expr* expr);
 Expr* expr_pointer_type (Arena* arena, Expr* pointed_type);
 Expr* expr_array_type   (Arena* arena, Expr* element_type, Expr* size_expr);
-Expr* expr_function     (Arena* arena, Expr** param_types, int param_count, Expr* return_type, Stmt* body);
+Expr* expr_function     (Arena* arena, Function_Param* params, int param_count, Expr* return_type, Stmt* body);
 Expr* expr_struct       (Arena* arena, Stmt** members, int member_count);
 Expr* expr_union        (Arena* arena, Stmt** members, int member_count);
-Expr* expr_enum         (Arena* arena, Enum_Item* items, int item_count, Function_Expr* methods, int method_count);
+Expr* expr_enum         (Arena* arena, Enum_Item* items, int item_count, Stmt** methods, int method_count);
 
 void expr_print(Expr* expr, int indent);
 

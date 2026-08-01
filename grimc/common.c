@@ -197,16 +197,13 @@ static void str_intern_test(void) {
 bool break_on_syntax_error = false;
 
 PRINTF_LIKE(1, 2)
-void syntax_error(const char *fmt, ...)  {
+void syntax_error_impl(const char *fmt, ...)  {
     fprintf(stderr, "Syntax error: ");
     va_list args;
     va_start(args, fmt);
     vfprintf(stderr, fmt, args);
     va_end(args);
     fputc('\n', stderr);
-    if (break_on_syntax_error) {
-        DEBUGBREAK();
-    }
 }
 
 //
